@@ -1,5 +1,6 @@
 ;;; -*- lexical-binding: t -*-
 
+;; try to boot yourself from the atom!!!
 (defun piano-play-key ()
   "get input envent and send to 'piano-key-down-function' and 'piano-key-up-function'"
   (interactive)
