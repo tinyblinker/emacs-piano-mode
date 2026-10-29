@@ -1,8 +1,11 @@
 * Hi There!
 ** NEXT 先实现:1234567映射到一个八度的七个音阶(按下1234567能正确发声)
-** TODO 用rust接入优化按键扫描(一个rust单文件程序处理当前所有键的情况,可以多个键,以纯文本形式传入elisp处理)和play sound(用现成工具或单文件rust)的部分
-** TODO (ai)自己造一种用来专门Play music on keyboard的符号系统替代传统乐谱?
-** TODO 遇到不会的,少看那种死板体系的一章一章的教程,直接上手去做,做最小原型去倒逼理解,lazy evaluation,每次只学习刚好能刚做下一步的知识,避免认知过载
+** TODO 用rust接入优化按键扫描(一个rust单文件程序处理当前所有键的情况(docker部署,单独给予input组权限
+evdev + rust方案),可以多个键,以纯文本形式传入elisp处理)和play sound(用现成工具或单文件rust)的部分
+打算emacs完全作为"镜像"来显示一个rust单文件程序的stdout(kdb_helper监听键盘事件+先用rodio正弦波)
+** TODO (ai)自己造一种用来专门Play music on keyboard的符号系统替代传统乐谱,写成DSL?
+** TODO 遇到不会的,少看那种死板体系的一章一章的教程,直接上手去做,做最小原型去倒逼理解,
+lazy evaluation,每次只学习刚好能刚做下一步的知识,避免认知过载
 * 核心函数
 - piano-play-key()
   play the key
