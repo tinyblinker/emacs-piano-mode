@@ -1,16 +1,23 @@
 ;;; -*- lexical-binding: t -*-
 
-;; try to boot yourself from the atom!!!
+;; (core) keys mapped here to be played
 (defun piano-play-key ()
   "get input envent and send to 'piano-key-down-function' and 'piano-key-up-function'"
   (interactive)
-  (if t (piano-key-down) (piano-key-up)))
+  (let* ((key last-input-event))
+    (if (piano-key-is-down key) (piano-key-down key)
+      (piano-key-up key))))
 
-(defun piano-key-down ()
-  (interactive)
-  (message "key-down"))
+;; if the piano's 'key' is down
+(defun piano-key-is-down (key))
 
-(defun piano-key-up ()
+;; the pianos's 'key' is down
+(defun piano-key-down (key)
   (interactive)
-  (message "key-up"))
+  (message "key-down:%s" key))
+
+;; the piano's 'key' is up
+(defun piano-key-up (key)
+  (interactive)
+  (message "key-up:%s" key))
 ;;; Piano-mode.el ends here
