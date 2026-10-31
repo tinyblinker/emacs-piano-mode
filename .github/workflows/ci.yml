@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  piano-core:
+    name: piano_core (build, check, clippy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: piano_core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libasound2-dev \
+            libclang-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: piano_core
+
+      - name: cargo build
+        run: cargo build --locked
+
+      - name: cargo check
+        run: cargo check --locked --all-targets
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets
+
+  elisp:
+    name: piano-mode.el (Emacs 31.1)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Emacs 31.1
+        uses: purcell/setup-emacs@master
+        with:
+          version: "31.1"
+
+      - name: Verify Emacs version
+        run: emacs --version | head -n 1 | grep -q 'GNU Emacs 31\.1'
+
+      - name: Byte-compile piano-mode.el
+        run: emacs --batch -Q -f batch-byte-compile piano-mode.el
+
+      - name: Load and exercise piano-mode.el
+        run: |
+          cat > /tmp/piano-mode-check.el <<'ELISP'
+          ;; -*- lexical-binding: t; -*-
+          (require 'cl-lib)
+
+          (load-file "piano-mode.el")
+
+          (unless (fboundp 'piano-mode)
+            (error "piano-mode is not defined"))
+          (unless (fboundp 'piano-play-key)
+            (error "piano-play-key is not defined"))
+
+          (dolist (key '("1" "2" "3" "4" "5" "6" "7"))
+            (unless (eq (lookup-key piano-mode-map key) #'piano-play-key)
+              (error "key %s is not bound to piano-play-key in piano-mode-map" key)))
+
+          (defun piano-ci-assert-play (is-down key expected)
+            "Check that pressing KEY calls the expected handler when IS-DOWN."
+            (let (calls)
+              (with-temp-buffer
+                (piano-mode 1)
+                (unless piano-mode
+                  (error "piano-mode did not enable"))
+                (unless (eq (key-binding key) #'piano-play-key)
+                  (error "key %s is not active while piano-mode is enabled" key))
+                (cl-letf (((symbol-function 'piano-key-is-down)
+                           (lambda (_key) is-down))
+                          ((symbol-function 'piano-key-down)
+                           (lambda (pressed) (push (cons 'down pressed) calls)))
+                          ((symbol-function 'piano-key-up)
+                           (lambda (pressed) (push (cons 'up pressed) calls))))
+                  (let ((last-input-event (aref key 0)))
+                    (call-interactively #'piano-play-key)))
+                (unless (equal calls (list expected))
+                  (error "pressing %s: expected %S, got %S" key expected calls))
+                (piano-mode -1)
+                (unless (not piano-mode)
+                  (error "piano-mode did not disable")))))
+
+          (piano-ci-assert-play nil "1" '(up . "1"))
+          (piano-ci-assert-play t "2" '(down . "2"))
+
+          (princ "piano-mode.el: all checks passed\n")
+          ELISP
+
+          emacs --batch -Q -l /tmp/piano-mode-check.el
