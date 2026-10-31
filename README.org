@@ -2,9 +2,8 @@
 ** NEXT 先实现:1234567映射到一个八度的七个音阶(按下1234567能正确发声)
 *** DONE evdev接收键盘输入信息(println!()成功打印)
 CLOSED: [2026-10-30 Fri 20:29]
-*** DONE (giveup ! bad idea)(放弃用rustysynth crates)利用用println!()信息维护一个键盘按下的状态的结构体,分别映射"1234567"到调用rustysynth库发出基本声音
-CLOSED: [2026-10-30 Fri 21:53]
-*** NEXT 利用用println!()信息维护一个键盘按下的状态的结构体,分别映射"1234567"到调用FluidSynth发出基本声音
+*** NEXT (用rustysynth crates)调用rustysynth(+输出到cpal)库发出基本声音
+*** TODO 利用用println!()信息维护一个键盘按下的状态的结构体,分别映射"1234567"到
 * TODO
 ** TODO 用rust接入优化按键扫描(一个rust单文件程序处理当前所有键的情况(docker部署,单独给予input组权限
 evdev + rust方案),可以多个键,以纯文本形式传入elisp处理)和play sound(用现成工具或单文件rust)的部分
