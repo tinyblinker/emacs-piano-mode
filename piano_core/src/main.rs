@@ -31,6 +31,12 @@ struct Opt {
     pipewire: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PcmData {
+    left: Vec<f32>,
+    right: Vec<f32>,
+}
+
 fn pick_device() -> evdev::Device {
     println!("pick device!");
     let mut args = std::env::args_os(); // get the command line args
@@ -113,18 +119,20 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
 
     // the output buffer(3 seconds)
     let sample_count = (3 * settings.sample_rate) as usize;
-    let mut left: Vec<f32> = vec![0_f32; sample_count];
-    let mut right: Vec<f32> = vec![0_f32; sample_count];
+    let mut pcm: PcmData = PcmData {
+        left: vec![0_f32; sample_count],
+        right: vec![0_f32; sample_count],
+    };
 
     // Render the waveform
-    synthesizer.render(&mut left[..], &mut right[..]);
+    synthesizer.render(&mut pcm.left, &mut pcm.right);
 
     // left, right => now have the data inside(PCM)
 
     // CPAL crate: PCM->linux alsa(play the PCM)
     let opt = Opt::parse();
     let host = cpal_init_host(&opt);
-    cpal_run(&opt, &host, &left[..], &right[..])?;
+    cpal_run(&opt, &host, &pcm)?;
     Ok(())
 }
 
@@ -155,7 +163,7 @@ fn cpal_init_host(opt: &Opt) -> cpal::Host {
     }
 }
 
-fn cpal_run(opt: &Opt, host: &Host, left: &[f32], right: &[f32]) -> anyhow::Result<()> {
+fn cpal_run(opt: &Opt, host: &Host, pcm_data: &PcmData) -> anyhow::Result<()> {
     let output_device = if let Some(ref device) = opt.output_device {
         let id = &device.parse().expect("failed to parse output device id");
         host.device_by_id(id)
@@ -171,7 +179,9 @@ fn cpal_run(opt: &Opt, host: &Host, left: &[f32], right: &[f32]) -> anyhow::Resu
     let output_config = output_device.default_output_config().unwrap();
 
     match output_config.sample_format() {
-        SampleFormat::F32 => run::<f32>(&output_device, output_config.into(), opt.latency),
+        SampleFormat::F32 => {
+            run::<f32>(&output_device, output_config.into(), opt.latency, &pcm_data)
+        }
         sample_format => panic!("Unsupported sample format '{sample_format}'"),
     }
 }
@@ -180,6 +190,7 @@ fn run<T>(
     output_device: &cpal::Device,
     config: cpal::StreamConfig,
     latency_ms: f32,
+    pcm_data: &PcmData,
 ) -> anyhow::Result<()>
 where
     T: cpal::SizedSample + std::fmt::Debug + Send + 'static,
