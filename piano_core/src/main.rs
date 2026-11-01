@@ -2,6 +2,7 @@ use clap::Parser;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Error, ErrorKind, Host, HostId, InputCallbackInfo, OutputCallbackInfo, SampleFormat,
+    SupportedStreamConfig,
 };
 use nix::{
     poll::PollTimeout,
@@ -9,7 +10,14 @@ use nix::{
 };
 use ringbuf::traits::{Consumer, Producer, Split};
 use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
-use std::{fs::File, io::Write, sync::Arc, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::Write,
+    sync::Arc,
+    thread::{self, sleep},
+    time::Duration,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "CPAL feedback example", long_about = None)]
@@ -31,10 +39,64 @@ struct Opt {
     pipewire: bool,
 }
 
+const STREAM_CHANNELS: usize = 2;
+const STREAM_SAMPLERATE: usize = 44100;
+
+#[derive(Debug, Clone)]
+struct KeyBoard {
+    // we need id to classified two different keyboards
+    id: usize,
+    // a hashmap that store all the status of the keyboard
+    keys_status_set: HashMap<String, KeyStatus>,
+}
+
+impl KeyBoard {
+    pub fn init(id: usize) -> Self {
+        Self {
+            id: id,
+            keys_status_set: HashMap::<String, KeyStatus>::new(),
+        }
+    }
+    pub fn update_keyboard(&mut self, key: String, status: KeyStatus) {
+        self.keys_status_set.insert(key, status);
+    }
+}
+
+#[derive(Clone, Debug, Copy)]
+enum KeyStatus {
+    KeyUp,
+    KeyDown,
+}
+
 #[derive(Debug, Clone)]
 struct PcmData {
     left: Vec<f32>,
     right: Vec<f32>,
+    sample_rate: f64,
+}
+
+// impl PcmData -> let PCM data generate form "left" & "right"
+impl PcmData {
+    pub fn new() -> Self {
+        Self {
+            left: vec![0_f32; STREAM_SAMPLERATE * 3],
+            right: vec![0_f32; STREAM_SAMPLERATE * 3],
+            sample_rate: STREAM_SAMPLERATE as f64,
+        }
+    }
+    pub fn generate_pcm(&self) -> Vec<f32> {
+        assert_eq!(
+            self.left.len(),
+            self.right.len(),
+            "left and right's pcm data len must be equal"
+        );
+        let mut output: Vec<f32> = Vec::with_capacity(self.left.len() * 2);
+        for (&l, &r) in self.left.iter().zip(self.right.iter()) {
+            output.push(l);
+            output.push(r);
+        }
+        output
+    }
 }
 
 fn pick_device() -> evdev::Device {
@@ -95,6 +157,28 @@ fn print_event(mut device: evdev::Device) -> std::io::Result<()> {
     Ok(())
 }
 
+fn generate_a_note_to_pcm(channel: i32, key: i32, velocity: i32) -> PcmData {
+    // 'rustysynth' crate => PCM data
+    let mut sf2 = File::open("TimGM6mb.sf2").unwrap();
+    let sound_font = Arc::new(SoundFont::new(&mut sf2).unwrap());
+
+    // create the synthesizer
+    let settings = SynthesizerSettings::new(STREAM_SAMPLERATE as i32);
+    let mut synthesizer = Synthesizer::new(&sound_font, &settings).unwrap();
+
+    // play some notes
+    synthesizer.note_on(channel, key, velocity);
+
+    // the output buffer(3 seconds)
+    let mut pcm: PcmData = PcmData::new();
+
+    // Render the waveform
+    synthesizer.render(&mut pcm.left, &mut pcm.right);
+
+    // left, right => now have the data inside(PCM)
+    pcm
+}
+
 fn main() -> anyhow::Result<(), anyhow::Error> {
     // // pick the keyboard device
     // let device = pick_device();
@@ -103,31 +187,18 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     // // read event
     // print_event(device)?;
 
+    // init a keyboard
+    let mut keyboard_a = KeyBoard::init(0);
+    keyboard_a.update_keyboard("1".into(), KeyStatus::KeyUp);
+    keyboard_a.update_keyboard("2".into(), KeyStatus::KeyUp);
+    keyboard_a.update_keyboard("3".into(), KeyStatus::KeyUp);
+    keyboard_a.update_keyboard("4".into(), KeyStatus::KeyUp);
+    keyboard_a.update_keyboard("5".into(), KeyStatus::KeyUp);
+    keyboard_a.update_keyboard("6".into(), KeyStatus::KeyUp);
+    keyboard_a.update_keyboard("7".into(), KeyStatus::KeyUp);
+
     // 'rustysynth' crate => PCM data
-    // play sounds
-    let mut sf2 = File::open("TimGM6mb.sf2").unwrap();
-    let sound_font = Arc::new(SoundFont::new(&mut sf2).unwrap());
-
-    // create the synthesizer
-    let settings = SynthesizerSettings::new(44100);
-    let mut synthesizer = Synthesizer::new(&sound_font, &settings).unwrap();
-
-    // play some notes
-    synthesizer.note_on(0, 60, 100);
-    synthesizer.note_on(0, 64, 100);
-    synthesizer.note_on(0, 67, 100);
-
-    // the output buffer(3 seconds)
-    let sample_count = (3 * settings.sample_rate) as usize;
-    let mut pcm: PcmData = PcmData {
-        left: vec![0_f32; sample_count],
-        right: vec![0_f32; sample_count],
-    };
-
-    // Render the waveform
-    synthesizer.render(&mut pcm.left, &mut pcm.right);
-
-    // left, right => now have the data inside(PCM)
+    let pcm = generate_a_note_to_pcm(0, 40, 100);
 
     // CPAL crate: PCM->linux alsa(play the PCM)
     let opt = Opt::parse();
@@ -176,11 +247,19 @@ fn cpal_run(opt: &Opt, host: &Host, pcm_data: &PcmData) -> anyhow::Result<()> {
 
     // We'll try and use the same configuration between streams to keep it simple.
     // let input_config = input_device.default_input_config().unwrap();
-    let output_config = output_device.default_output_config().unwrap();
+    let output_config: SupportedStreamConfig = output_device.default_output_config().unwrap();
+    println!("####[debug]output_config = {:?}", output_config);
 
     match output_config.sample_format() {
         SampleFormat::F32 => {
-            run::<f32>(&output_device, output_config.into(), opt.latency, &pcm_data)
+            // edit stream configs
+            let mut config: cpal::StreamConfig = output_config.into();
+            config.channels = STREAM_CHANNELS as u16;
+            config.sample_rate = STREAM_SAMPLERATE as u32;
+            println!("####[debug]config = {:?}", config);
+
+            // build and play the stream
+            run::<f32>(&output_device, config, opt.latency, &pcm_data)
         }
         sample_format => panic!("Unsupported sample format '{sample_format}'"),
     }
@@ -193,7 +272,7 @@ fn run<T>(
     pcm_data: &PcmData,
 ) -> anyhow::Result<()>
 where
-    T: cpal::SizedSample + std::fmt::Debug + Send + 'static,
+    T: cpal::SizedSample + std::fmt::Debug + Send + 'static + cpal::FromSample<f32>,
 {
     // Create a delay in case the input and output devices aren't synced.
     let latency_frames = (latency_ms / 1_000.0) * config.sample_rate as f32;
@@ -209,6 +288,13 @@ where
         // so this should never fail
         producer.try_push(T::EQUILIBRIUM).unwrap();
     }
+
+    // push 3s' data to the ringbuf
+    let pcm_push_data: Vec<T> = pcm_data
+        .generate_pcm()
+        .iter()
+        .map(|sample| T::from_sample_(sample.clone()))
+        .collect();
 
     let output_data_fn = move |data: &mut [T], _: &OutputCallbackInfo| {
         let read = consumer.pop_slice(data);
@@ -231,6 +317,17 @@ where
     println!("Starting the input and output streams with `{latency_ms}` milliseconds of latency.");
     // input_stream.play()?;
     output_stream.play()?;
+
+    let mut sent: usize = 0;
+    loop {
+        if sent < pcm_push_data.len() {
+            let i = producer.push_slice(&pcm_push_data[sent..]);
+            sent += i;
+            sleep(Duration::from_millis(70));
+        } else {
+            break;
+        }
+    }
 
     // Run for 10 seconds before closing.
     println!("Playing for 10 seconds...");
