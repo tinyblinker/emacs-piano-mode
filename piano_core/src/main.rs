@@ -141,7 +141,11 @@ fn print_event(mut device: evdev::Device) -> std::io::Result<()> {
         match device.fetch_events() {
             Ok(ev_iter) => {
                 for ev in ev_iter {
-                    println!("{ev:?}");
+                    if ev.event_type() == evdev::EventType::KEY {
+                        println!("ev.value()={:?}", ev.value());
+                        println!("ev.code()={:?}", ev.code());
+                        println!("{ev:?}");
+                    }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -180,12 +184,12 @@ fn generate_a_note_to_pcm(channel: i32, key: i32, velocity: i32) -> PcmData {
 }
 
 fn main() -> anyhow::Result<(), anyhow::Error> {
-    // // pick the keyboard device
-    // let device = pick_device();
-    // println!("picked the device:{}", device);
+    // pick the keyboard device
+    let device = pick_device();
+    println!("picked the device:{}", device);
 
-    // // read event
-    // print_event(device)?;
+    // read event
+    print_event(device)?;
 
     // init a keyboard
     let mut keyboard_a = KeyBoard::init(0);
@@ -197,13 +201,13 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     keyboard_a.update_keyboard("6".into(), KeyStatus::KeyUp);
     keyboard_a.update_keyboard("7".into(), KeyStatus::KeyUp);
 
-    // 'rustysynth' crate => PCM data
-    let pcm = generate_a_note_to_pcm(0, 40, 100);
+    // // 'rustysynth' crate => PCM data
+    // let pcm = generate_a_note_to_pcm(0, 40, 100);
 
-    // CPAL crate: PCM->linux alsa(play the PCM)
-    let opt = Opt::parse();
-    let host = cpal_init_host(&opt);
-    cpal_run(&opt, &host, &pcm)?;
+    // // CPAL crate: PCM->linux alsa(play the PCM)
+    // let opt = Opt::parse();
+    // let host = cpal_init_host(&opt);
+    // cpal_run(&opt, &host, &pcm)?;
     Ok(())
 }
 
