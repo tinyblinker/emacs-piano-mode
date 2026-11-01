@@ -2,6 +2,7 @@ use clap::Parser;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Error, ErrorKind, Host, HostId, InputCallbackInfo, OutputCallbackInfo, SampleFormat,
+    SupportedStreamConfig,
 };
 use nix::{
     poll::PollTimeout,
@@ -30,6 +31,9 @@ struct Opt {
     #[arg(long, default_value_t = false)]
     pipewire: bool,
 }
+
+const STREAM_CHANNELS: usize = 2;
+const STREAM_SAMPLERATE: usize = 44100;
 
 #[derive(Debug, Clone)]
 struct PcmData {
@@ -109,7 +113,7 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     let sound_font = Arc::new(SoundFont::new(&mut sf2).unwrap());
 
     // create the synthesizer
-    let settings = SynthesizerSettings::new(44100);
+    let settings = SynthesizerSettings::new(STREAM_SAMPLERATE as i32);
     let mut synthesizer = Synthesizer::new(&sound_font, &settings).unwrap();
 
     // play some notes
@@ -176,11 +180,19 @@ fn cpal_run(opt: &Opt, host: &Host, pcm_data: &PcmData) -> anyhow::Result<()> {
 
     // We'll try and use the same configuration between streams to keep it simple.
     // let input_config = input_device.default_input_config().unwrap();
-    let output_config = output_device.default_output_config().unwrap();
+    let output_config: SupportedStreamConfig = output_device.default_output_config().unwrap();
+    println!("####[debug]output_config = {:?}", output_config);
 
     match output_config.sample_format() {
         SampleFormat::F32 => {
-            run::<f32>(&output_device, output_config.into(), opt.latency, &pcm_data)
+            // edit stream configs
+            let mut config: cpal::StreamConfig = output_config.into();
+            config.channels = STREAM_CHANNELS as u16;
+            config.sample_rate = STREAM_SAMPLERATE as u32;
+            println!("####[debug]config = {:?}", config);
+            
+            // build and play the stream
+            run::<f32>(&output_device, config, opt.latency, &pcm_data)
         }
         sample_format => panic!("Unsupported sample format '{sample_format}'"),
     }
