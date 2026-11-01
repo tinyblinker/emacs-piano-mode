@@ -47,18 +47,33 @@ struct KeyBoard {
     // we need id to classified two different keyboards
     id: usize,
     // a hashmap that store all the status of the keyboard
-    keys_status_set: HashMap<String, KeyStatus>,
+    keys_status_set: HashMap<evdev::KeyCode, KeyStatus>,
 }
 
 impl KeyBoard {
     pub fn init(id: usize) -> Self {
         Self {
             id: id,
-            keys_status_set: HashMap::<String, KeyStatus>::new(),
+            keys_status_set: HashMap::<evdev::KeyCode, KeyStatus>::new(),
         }
     }
-    pub fn update_keyboard(&mut self, key: String, status: KeyStatus) {
+    pub fn update_keyboard(&mut self, key: evdev::KeyCode, status: KeyStatus) {
         self.keys_status_set.insert(key, status);
+    }
+}
+
+impl TryFrom<i32> for KeyStatus {
+    type Error = anyhow::Error;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0_i32 => Ok(KeyStatus::KeyUp),
+            1_i32 => Ok(KeyStatus::KeyDown),
+            2_i32 => Ok(KeyStatus::KeyPressed),
+            _ => Err(anyhow::Error::msg(
+                "The pressed key has an unknowned KeyStatus",
+            )),
+        }
     }
 }
 
@@ -66,6 +81,7 @@ impl KeyBoard {
 enum KeyStatus {
     KeyUp,
     KeyDown,
+    KeyPressed,
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +141,7 @@ fn pick_device() -> evdev::Device {
     }
 }
 
-fn print_event(mut device: evdev::Device) -> std::io::Result<()> {
+fn sync_keyboards(mut device: evdev::Device, keyboard: &mut KeyBoard) -> std::io::Result<()> {
     // set the device(like a kind of fd) as nonblocking
     let _ = device.set_nonblocking(true)?;
 
@@ -142,9 +158,13 @@ fn print_event(mut device: evdev::Device) -> std::io::Result<()> {
             Ok(ev_iter) => {
                 for ev in ev_iter {
                     if ev.event_type() == evdev::EventType::KEY {
-                        println!("ev.value()={:?}", ev.value());
-                        println!("ev.code()={:?}", ev.code());
-                        println!("{ev:?}");
+                        // println!("ev.value()={:?}", ev.value());
+                        // println!("ev.code()={:?}", ev.code());
+                        keyboard.update_keyboard(
+                            evdev::KeyCode(ev.code()),
+                            ev.value().try_into().unwrap(),
+                        );
+                        println!("keyboard={:?}", keyboard);
                     }
                 }
             }
@@ -184,22 +204,15 @@ fn generate_a_note_to_pcm(channel: i32, key: i32, velocity: i32) -> PcmData {
 }
 
 fn main() -> anyhow::Result<(), anyhow::Error> {
+    // init a keyboard(virtual)
+    let mut keyboard_a = KeyBoard::init(0);
+
     // pick the keyboard device
     let device = pick_device();
     println!("picked the device:{}", device);
 
     // read event
-    print_event(device)?;
-
-    // init a keyboard
-    let mut keyboard_a = KeyBoard::init(0);
-    keyboard_a.update_keyboard("1".into(), KeyStatus::KeyUp);
-    keyboard_a.update_keyboard("2".into(), KeyStatus::KeyUp);
-    keyboard_a.update_keyboard("3".into(), KeyStatus::KeyUp);
-    keyboard_a.update_keyboard("4".into(), KeyStatus::KeyUp);
-    keyboard_a.update_keyboard("5".into(), KeyStatus::KeyUp);
-    keyboard_a.update_keyboard("6".into(), KeyStatus::KeyUp);
-    keyboard_a.update_keyboard("7".into(), KeyStatus::KeyUp);
+    sync_keyboards(device, &mut keyboard_a)?;
 
     // // 'rustysynth' crate => PCM data
     // let pcm = generate_a_note_to_pcm(0, 40, 100);
