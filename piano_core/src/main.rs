@@ -189,14 +189,19 @@ fn sync_keyboards(mut device: evdev::Device, keyboard: Arc<RwLock<KeyBoard>>) {
     }
 }
 
-fn generate_a_note_to_pcm(channel: i32, key: i32, velocity: i32) -> PcmData {
-    // 'rustysynth' crate => PCM data
-    let mut sf2 = File::open("TimGM6mb.sf2").unwrap();
-    let sound_font = Arc::new(SoundFont::new(&mut sf2).unwrap());
+fn generate_a_note_to_pcm(
+    channel: i32,
+    key: i32,
+    velocity: i32,
+    synthesizer: &mut Synthesizer,
+) -> PcmData {
+    // // 'rustysynth' crate => PCM data
+    // let mut sf2 = File::open("TimGM6mb.sf2").unwrap();
+    // let sound_font = Arc::new(SoundFont::new(&mut sf2).unwrap());
 
-    // create the synthesizer
-    let settings = SynthesizerSettings::new(STREAM_SAMPLERATE as i32);
-    let mut synthesizer = Synthesizer::new(&sound_font, &settings).unwrap();
+    // // create the synthesizer
+    // let settings = SynthesizerSettings::new(STREAM_SAMPLERATE as i32);
+    // let mut synthesizer = Synthesizer::new(&sound_font, &settings).unwrap();
 
     // play some notes
     synthesizer.note_on(channel, key, velocity);
@@ -246,6 +251,11 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     });
 
     // 'rustysynth' crate => PCM data
+    let mut sf2 = File::open("TimGM6mb.sf2").unwrap();
+    let sound_font = Arc::new(SoundFont::new(&mut sf2).unwrap());
+    // create the synthesizer
+    let settings = SynthesizerSettings::new(STREAM_SAMPLERATE as i32);
+    let mut synthesizer = Synthesizer::new(&sound_font, &settings).unwrap();
     let output_keyboard = Arc::clone(&keyboard_a);
     let handle_render = thread::spawn(move || {
         loop {
@@ -265,23 +275,22 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
             for (key, value) in keyboard_hashmap.iter() {
                 match *key {
                     KeyCode::KEY_1 if *value == KeyStatus::KeyDown => {
-                        let pcm: PcmData = generate_a_note_to_pcm(0, 40, 100);
+                        let pcm: PcmData = generate_a_note_to_pcm(0, 40, 100, &mut synthesizer);
                         let pcm_raw = pcm.generate_pcm();
-
                         producer.push_slice(&pcm_raw);
                     }
                     KeyCode::KEY_2 if *value == KeyStatus::KeyDown => {
-                        let pcm: PcmData = generate_a_note_to_pcm(0, 50, 100);
+                        let pcm: PcmData = generate_a_note_to_pcm(0, 50, 100, &mut synthesizer);
                         let pcm_raw = pcm.generate_pcm();
                         producer.push_slice(&pcm_raw);
                     }
                     KeyCode::KEY_3 if *value == KeyStatus::KeyDown => {
-                        let pcm: PcmData = generate_a_note_to_pcm(0, 60, 100);
+                        let pcm: PcmData = generate_a_note_to_pcm(0, 60, 100, &mut synthesizer);
                         let pcm_raw = pcm.generate_pcm();
                         producer.push_slice(&pcm_raw);
                     }
                     KeyCode::KEY_4 if *value == KeyStatus::KeyDown => {
-                        let pcm: PcmData = generate_a_note_to_pcm(0, 70, 100);
+                        let pcm: PcmData = generate_a_note_to_pcm(0, 70, 100, &mut synthesizer);
                         let pcm_raw = pcm.generate_pcm();
                         producer.push_slice(&pcm_raw);
                     }
