@@ -4,6 +4,7 @@ use cpal::{
     Error, ErrorKind, Host, HostId, InputCallbackInfo, OutputCallbackInfo, SampleFormat,
     SupportedStreamConfig,
 };
+use evdev::KeyCode;
 use nix::{
     poll::PollTimeout,
     sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags},
@@ -14,7 +15,7 @@ use std::{
     collections::HashMap,
     fs::File,
     io::Write,
-    sync::Arc,
+    sync::{Arc, RwLock},
     thread::{self, sleep},
     time::Duration,
 };
@@ -41,6 +42,7 @@ struct Opt {
 
 const STREAM_CHANNELS: usize = 2;
 const STREAM_SAMPLERATE: usize = 44100;
+const STREAM_LATENCY: usize = 150; // latency (ms)
 
 #[derive(Debug, Clone)]
 struct KeyBoard {
@@ -77,7 +79,7 @@ impl TryFrom<i32> for KeyStatus {
     }
 }
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
 enum KeyStatus {
     KeyUp,
     KeyDown,
@@ -141,14 +143,14 @@ fn pick_device() -> evdev::Device {
     }
 }
 
-fn sync_keyboards(mut device: evdev::Device, keyboard: &mut KeyBoard) -> std::io::Result<()> {
+fn sync_keyboards(mut device: evdev::Device, keyboard: Arc<RwLock<KeyBoard>>) {
     // set the device(like a kind of fd) as nonblocking
-    let _ = device.set_nonblocking(true)?;
+    let _ = device.set_nonblocking(true);
 
     // create epoll handle and attach raw_fd
-    let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?;
+    let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC).unwrap();
     let event = EpollEvent::new(EpollFlags::EPOLLIN, 0);
-    epoll.add(&device, event)?;
+    epoll.add(&device, event).unwrap();
 
     // set the event to wait
     let mut events = [EpollEvent::empty(); 2];
@@ -160,17 +162,28 @@ fn sync_keyboards(mut device: evdev::Device, keyboard: &mut KeyBoard) -> std::io
                     if ev.event_type() == evdev::EventType::KEY {
                         // println!("ev.value()={:?}", ev.value());
                         // println!("ev.code()={:?}", ev.code());
-                        keyboard.update_keyboard(
-                            evdev::KeyCode(ev.code()),
-                            ev.value().try_into().unwrap(),
-                        );
+                        match keyboard.try_write() {
+                            Ok(mut guard) => {
+                                guard.update_keyboard(
+                                    evdev::KeyCode(ev.code()),
+                                    ev.value().try_into().unwrap(),
+                                );
+                            }
+                            Err(_) => {
+                                println!(
+                                    "####[debug]try_write() \"keyboard\" failed in handle render"
+                                );
+                            }
+                        }
+                        // just maintain the "keyboard" struct to share with the 'rustysynth' for
+                        // rendering the PCM data
                         println!("keyboard={:?}", keyboard);
                     }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // wait forever for bytes available on dev
-                epoll.wait(&mut events, PollTimeout::NONE)?;
+                epoll.wait(&mut events, PollTimeout::NONE).unwrap();
             }
             Err(e) => {
                 println!("err:{e}");
@@ -178,7 +191,6 @@ fn sync_keyboards(mut device: evdev::Device, keyboard: &mut KeyBoard) -> std::io
             }
         }
     }
-    Ok(())
 }
 
 fn generate_a_note_to_pcm(channel: i32, key: i32, velocity: i32) -> PcmData {
@@ -203,24 +215,94 @@ fn generate_a_note_to_pcm(channel: i32, key: i32, velocity: i32) -> PcmData {
     pcm
 }
 
+type ProducerType = ringbuf::wrap::caching::Caching<
+    Arc<ringbuf::SharedRb<ringbuf::storage::Heap<f32>>>,
+    true,
+    false,
+>;
+type ConsumerType = ringbuf::wrap::caching::Caching<
+    Arc<ringbuf::SharedRb<ringbuf::storage::Heap<f32>>>,
+    false,
+    true,
+>;
+
 fn main() -> anyhow::Result<(), anyhow::Error> {
-    // init a keyboard(virtual)
-    let mut keyboard_a = KeyBoard::init(0);
+    // init a keyboard(virtual) Arc<Rwlock<_>>
+    let keyboard_a = Arc::new(RwLock::new(KeyBoard::init(0)));
 
     // pick the keyboard device
     let device = pick_device();
     println!("picked the device:{}", device);
 
-    // read event
-    sync_keyboards(device, &mut keyboard_a)?;
+    // define a ringbuf for 'PCM' data (from 'handle_keyboards' to 'cpal_run')
+    // The buffer to share samples
+    let latency_frames = (STREAM_LATENCY as f32 / 1_000.0) * STREAM_SAMPLERATE as f32;
+    let latency_samples = latency_frames as usize * STREAM_CHANNELS as usize;
+    let ring = ringbuf::HeapRb::<f32>::new(latency_samples * 2);
+    let (mut producer, mut consumer): (ProducerType, ConsumerType) = ring.split();
 
-    // // 'rustysynth' crate => PCM data
-    // let pcm = generate_a_note_to_pcm(0, 40, 100);
+    // read event thread (read the event and send it to the
+    // 'rustysynth' to render as PCM data and 'cpal' to
+    // play the PCM data)
+    let input_keyboard = Arc::clone(&keyboard_a);
+    let handle_keyboards = thread::spawn(move || {
+        sync_keyboards(device, input_keyboard);
+    });
+
+    // 'rustysynth' crate => PCM data
+    let output_keyboard = Arc::clone(&keyboard_a);
+    let handle_render = thread::spawn(move || {
+        loop {
+            // read the hashmap of keyboard,base on it to play notes
+            let mut keyboard_hashmap: HashMap<KeyCode, KeyStatus> = HashMap::new();
+            match output_keyboard.try_read() {
+                Ok(guard) => {
+                    let tmp = guard.keys_status_set.clone();
+                    keyboard_hashmap = tmp;
+                }
+                Err(_) => {
+                    println!("####[debug]try_read() \"keyboard\" failed in handle render");
+                }
+            }
+
+            // for each key, base on its status to play some notes?
+            for (key, value) in keyboard_hashmap.iter() {
+                match *key {
+                    KeyCode::KEY_1 if *value == KeyStatus::KeyDown => {
+                        let pcm: PcmData = generate_a_note_to_pcm(0, 40, 100);
+                        let pcm_raw = pcm.generate_pcm();
+                        producer.push_slice(&pcm_raw);
+                    }
+                    KeyCode::KEY_2 if *value == KeyStatus::KeyDown => {
+                        let pcm: PcmData = generate_a_note_to_pcm(0, 50, 100);
+                        let pcm_raw = pcm.generate_pcm();
+                        producer.push_slice(&pcm_raw);
+                    }
+                    KeyCode::KEY_3 if *value == KeyStatus::KeyDown => {
+                        let pcm: PcmData = generate_a_note_to_pcm(0, 60, 100);
+                        let pcm_raw = pcm.generate_pcm();
+                        producer.push_slice(&pcm_raw);
+                    }
+                    KeyCode::KEY_4 if *value == KeyStatus::KeyDown => {
+                        let pcm: PcmData = generate_a_note_to_pcm(0, 70, 100);
+                        let pcm_raw = pcm.generate_pcm();
+                        producer.push_slice(&pcm_raw);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
 
     // // CPAL crate: PCM->linux alsa(play the PCM)
     // let opt = Opt::parse();
     // let host = cpal_init_host(&opt);
     // cpal_run(&opt, &host, &pcm)?;
+
+    // wait for the thread to be done(break inner loop / return)
+    handle_keyboards.join().unwrap();
+    handle_render.join().unwrap();
+
     Ok(())
 }
 
