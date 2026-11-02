@@ -9,6 +9,7 @@ CLOSED: [2026-11-01 Sun 17:06]
 CLOSED: [2026-11-01 Sun 18:16]
 **** DONE 解析键盘输入:正确维护1234567的状态(Keyboard结构体中的哈希表)
 CLOSED: [2026-11-01 Sun 18:40]
+**** NEXT 当输入"1"时,播放一个音符
 * TODO
 ** TODO 用rust接入优化按键扫描(一个rust单文件程序处理当前所有键的情况(docker部署,单独给予input组权限
 evdev + rust方案),可以多个键,以纯文本形式传入elisp处理)和play sound(用现成工具或单文件rust)的部分
