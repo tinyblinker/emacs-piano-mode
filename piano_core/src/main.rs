@@ -1,8 +1,7 @@
 use clap::Parser;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    Error, ErrorKind, Host, HostId, InputCallbackInfo, OutputCallbackInfo, SampleFormat,
-    SupportedStreamConfig,
+    Error, ErrorKind, Host, HostId, OutputCallbackInfo, SampleFormat, SupportedStreamConfig,
 };
 use evdev::KeyCode;
 use nix::{
@@ -16,8 +15,7 @@ use std::{
     fs::File,
     io::Write,
     sync::{Arc, RwLock},
-    thread::{self, sleep},
-    time::Duration,
+    thread::{self},
 };
 
 #[derive(Parser, Debug)]
@@ -90,7 +88,6 @@ enum KeyStatus {
 struct PcmData {
     left: Vec<f32>,
     right: Vec<f32>,
-    sample_rate: f64,
 }
 
 // impl PcmData -> let PCM data generate form "left" & "right"
@@ -99,7 +96,6 @@ impl PcmData {
         Self {
             left: vec![0_f32; STREAM_SAMPLERATE * 3],
             right: vec![0_f32; STREAM_SAMPLERATE * 3],
-            sample_rate: STREAM_SAMPLERATE as f64,
         }
     }
     pub fn generate_pcm(&self) -> Vec<f32> {
@@ -177,7 +173,7 @@ fn sync_keyboards(mut device: evdev::Device, keyboard: Arc<RwLock<KeyBoard>>) {
                         }
                         // just maintain the "keyboard" struct to share with the 'rustysynth' for
                         // rendering the PCM data
-                        println!("keyboard={:?}", keyboard);
+                        println!("####[debug]keyboard={:?}", keyboard);
                     }
                 }
             }
@@ -238,8 +234,8 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     // The buffer to share samples
     let latency_frames = (STREAM_LATENCY as f32 / 1_000.0) * STREAM_SAMPLERATE as f32;
     let latency_samples = latency_frames as usize * STREAM_CHANNELS as usize;
-    let ring = ringbuf::HeapRb::<f32>::new(latency_samples * 2);
-    let (mut producer, mut consumer): (ProducerType, ConsumerType) = ring.split();
+    let pcm_ring = ringbuf::HeapRb::<f32>::new(latency_samples * 2);
+    let (mut producer, consumer): (ProducerType, ConsumerType) = pcm_ring.split();
 
     // read event thread (read the event and send it to the
     // 'rustysynth' to render as PCM data and 'cpal' to
@@ -271,6 +267,7 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
                     KeyCode::KEY_1 if *value == KeyStatus::KeyDown => {
                         let pcm: PcmData = generate_a_note_to_pcm(0, 40, 100);
                         let pcm_raw = pcm.generate_pcm();
+
                         producer.push_slice(&pcm_raw);
                     }
                     KeyCode::KEY_2 if *value == KeyStatus::KeyDown => {
@@ -294,19 +291,23 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
         }
     });
 
-    // // CPAL crate: PCM->linux alsa(play the PCM)
-    // let opt = Opt::parse();
-    // let host = cpal_init_host(&opt);
-    // cpal_run(&opt, &host, &pcm)?;
+    // CPAL crate: PCM->linux alsa(play the PCM)
+    let opt = Opt::parse();
+    let host = cpal_init_host(&opt);
+    let handle_cpal = thread::spawn(move || {
+        cpal_run(&opt, &host, consumer);
+    });
 
     // wait for the thread to be done(break inner loop / return)
     handle_keyboards.join().unwrap();
     handle_render.join().unwrap();
+    handle_cpal.join().unwrap();
 
     Ok(())
 }
 
 fn cpal_init_host(opt: &Opt) -> cpal::Host {
+    #[allow(unused_assignments)]
     let mut pipewire_host_id: Result<HostId, Error> = Err(ErrorKind::HostUnavailable.into());
 
     #[cfg(any(
@@ -333,7 +334,7 @@ fn cpal_init_host(opt: &Opt) -> cpal::Host {
     }
 }
 
-fn cpal_run(opt: &Opt, host: &Host, pcm_data: &PcmData) -> anyhow::Result<()> {
+fn cpal_run(opt: &Opt, host: &Host, consumer: ConsumerType) {
     let output_device = if let Some(ref device) = opt.output_device {
         let id = &device.parse().expect("failed to parse output device id");
         host.device_by_id(id)
@@ -358,7 +359,7 @@ fn cpal_run(opt: &Opt, host: &Host, pcm_data: &PcmData) -> anyhow::Result<()> {
             println!("####[debug]config = {:?}", config);
 
             // build and play the stream
-            run::<f32>(&output_device, config, opt.latency, &pcm_data)
+            run::<f32>(&output_device, config, opt.latency, consumer);
         }
         sample_format => panic!("Unsupported sample format '{sample_format}'"),
     }
@@ -368,35 +369,40 @@ fn run<T>(
     output_device: &cpal::Device,
     config: cpal::StreamConfig,
     latency_ms: f32,
-    pcm_data: &PcmData,
-) -> anyhow::Result<()>
-where
+    mut consumer: ConsumerType,
+) where
     T: cpal::SizedSample + std::fmt::Debug + Send + 'static + cpal::FromSample<f32>,
 {
-    // Create a delay in case the input and output devices aren't synced.
-    let latency_frames = (latency_ms / 1_000.0) * config.sample_rate as f32;
-    let latency_samples = latency_frames as usize * config.channels as usize;
+    // // Create a delay in case the input and output devices aren't synced.
+    // let latency_frames = (latency_ms / 1_000.0) * config.sample_rate as f32;
+    // let latency_samples = latency_frames as usize * config.channels as usize;
 
-    // The buffer to share samples
-    let ring = ringbuf::HeapRb::<T>::new(latency_samples * 2);
-    let (mut producer, mut consumer) = ring.split();
+    // // The buffer to share samples
+    // let ring = ringbuf::HeapRb::<T>::new(latency_samples * 2);
+    // let (mut producer, mut consumer) = ring.split();
 
     // Pre-fill with silence equal to the length of the delay.
-    for _ in 0..latency_samples {
-        // The ring buffer has twice as much space as necessary to add latency here,
-        // so this should never fail
-        producer.try_push(T::EQUILIBRIUM).unwrap();
-    }
+    // for _ in 0..latency_samples {
+    //     // The ring buffer has twice as much space as necessary to add latency here,
+    //     // so this should never fail
+    //     producer.try_push(T::EQUILIBRIUM).unwrap();
+    // }
 
-    // push 3s' data to the ringbuf
-    let pcm_push_data: Vec<T> = pcm_data
-        .generate_pcm()
-        .iter()
-        .map(|sample| T::from_sample_(sample.clone()))
-        .collect();
+    // // push 3s' data to the ringbuf
+    // let pcm_push_data: Vec<T> = pcm_data
+    //     .generate_pcm()
+    //     .iter()
+    //     .map(|sample| T::from_sample_(sample.clone()))
+    //     .collect();
 
     let output_data_fn = move |data: &mut [T], _: &OutputCallbackInfo| {
-        let read = consumer.pop_slice(data);
+        let tmp = &mut [0_f32; STREAM_SAMPLERATE * STREAM_CHANNELS];
+        let read = consumer.pop_slice(tmp);
+        data.iter_mut()
+            .zip(tmp.iter())
+            .for_each(|(data_dst, data_tmp)| {
+                *data_dst = T::from_sample(*data_tmp);
+            });
         if read < data.len() {
             data[read..].fill(T::EQUILIBRIUM);
             eprintln!("input stream fell behind: try increasing latency");
@@ -409,24 +415,26 @@ where
         T::FORMAT
     );
     // let input_stream = input_device.build_input_stream(config, input_data_fn, err_fn, None)?;
-    let output_stream = output_device.build_output_stream(config, output_data_fn, err_fn, None)?;
+    let output_stream = output_device
+        .build_output_stream(config, output_data_fn, err_fn, None)
+        .unwrap();
     println!("Successfully built streams.");
 
     // Play the streams.
     println!("Starting the input and output streams with `{latency_ms}` milliseconds of latency.");
     // input_stream.play()?;
-    output_stream.play()?;
+    output_stream.play().unwrap();
 
-    let mut sent: usize = 0;
-    loop {
-        if sent < pcm_push_data.len() {
-            let i = producer.push_slice(&pcm_push_data[sent..]);
-            sent += i;
-            sleep(Duration::from_millis(70));
-        } else {
-            break;
-        }
-    }
+    // let mut sent: usize = 0;
+    // loop {
+    //     if sent < pcm_push_data.len() {
+    //         let i = producer.push_slice(&pcm_push_data[sent..]);
+    //         sent += i;
+    //         sleep(Duration::from_millis(70));
+    //     } else {
+    //         break;
+    //     }
+    // }
 
     // Run for 10 seconds before closing.
     println!("Playing for 10 seconds...");
@@ -434,7 +442,6 @@ where
     // drop(input_stream);
     drop(output_stream);
     println!("Done!");
-    Ok(())
 }
 
 fn err_fn(err: Error) {
