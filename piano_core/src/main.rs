@@ -13,9 +13,11 @@ use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
 use std::{
     collections::HashMap,
     fs::File,
-    io::Write,
+    io::{BufWriter, Write},
+    process::{ChildStdin, Command, Stdio},
     sync::{Arc, RwLock},
     thread::{self},
+    time::Duration,
 };
 
 #[derive(Parser, Debug)]
@@ -227,92 +229,149 @@ type ConsumerType = ringbuf::wrap::caching::Caching<
     true,
 >;
 
-fn main() -> anyhow::Result<(), anyhow::Error> {
-    // init a keyboard(virtual) Arc<Rwlock<_>>
-    let keyboard_a = Arc::new(RwLock::new(KeyBoard::init(0)));
+#[derive(Debug)]
+enum NoteStatus {
+    NoteOn,
+    NoteOff,
+}
 
-    // pick the keyboard device
-    let device = pick_device();
-    println!("picked the device:{}", device);
-
-    // define a ringbuf for 'PCM' data (from 'handle_keyboards' to 'cpal_run')
-    // The buffer to share samples
-    let latency_frames = (STREAM_LATENCY as f32 / 1_000.0) * STREAM_SAMPLERATE as f32;
-    let latency_samples = latency_frames as usize * STREAM_CHANNELS as usize;
-    let pcm_ring = ringbuf::HeapRb::<f32>::new(latency_samples * 2);
-    let (mut producer, consumer): (ProducerType, ConsumerType) = pcm_ring.split();
-
-    // read event thread (read the event and send it to the
-    // 'rustysynth' to render as PCM data and 'cpal' to
-    // play the PCM data)
-    let input_keyboard = Arc::clone(&keyboard_a);
-    let handle_keyboards = thread::spawn(move || {
-        sync_keyboards(device, input_keyboard);
-    });
-
-    // 'rustysynth' crate => PCM data
-    let mut sf2 = File::open("TimGM6mb.sf2").unwrap();
-    let sound_font = Arc::new(SoundFont::new(&mut sf2).unwrap());
-    // create the synthesizer
-    let settings = SynthesizerSettings::new(STREAM_SAMPLERATE as i32);
-    let mut synthesizer = Synthesizer::new(&sound_font, &settings).unwrap();
-    let output_keyboard = Arc::clone(&keyboard_a);
-    let handle_render = thread::spawn(move || {
-        loop {
-            // read the hashmap of keyboard,base on it to play notes
-            let mut keyboard_hashmap: HashMap<KeyCode, KeyStatus> = HashMap::new();
-            match output_keyboard.try_read() {
-                Ok(guard) => {
-                    let tmp = guard.keys_status_set.clone();
-                    keyboard_hashmap = tmp;
-                }
-                Err(_) => {
-                    println!("####[debug]try_read() \"keyboard\" failed in handle render");
-                }
-            }
-
-            // for each key, base on its status to play some notes?
-            for (key, value) in keyboard_hashmap.iter() {
-                match *key {
-                    KeyCode::KEY_1 if *value == KeyStatus::KeyDown => {
-                        let pcm: PcmData = generate_a_note_to_pcm(0, 40, 100, &mut synthesizer);
-                        let pcm_raw = pcm.generate_pcm();
-                        producer.push_slice(&pcm_raw);
-                    }
-                    KeyCode::KEY_2 if *value == KeyStatus::KeyDown => {
-                        let pcm: PcmData = generate_a_note_to_pcm(0, 50, 100, &mut synthesizer);
-                        let pcm_raw = pcm.generate_pcm();
-                        producer.push_slice(&pcm_raw);
-                    }
-                    KeyCode::KEY_3 if *value == KeyStatus::KeyDown => {
-                        let pcm: PcmData = generate_a_note_to_pcm(0, 60, 100, &mut synthesizer);
-                        let pcm_raw = pcm.generate_pcm();
-                        producer.push_slice(&pcm_raw);
-                    }
-                    KeyCode::KEY_4 if *value == KeyStatus::KeyDown => {
-                        let pcm: PcmData = generate_a_note_to_pcm(0, 70, 100, &mut synthesizer);
-                        let pcm_raw = pcm.generate_pcm();
-                        producer.push_slice(&pcm_raw);
-                    }
-                    _ => {}
-                }
-            }
+fn plat_note(
+    stdin_buffer_write: &mut BufWriter<ChildStdin>,
+    note_status: NoteStatus,
+    channel: usize,
+    midi: usize,
+    velocity: usize,
+) -> anyhow::Result<(), anyhow::Error> {
+    match note_status {
+        NoteStatus::NoteOn => {
+            writeln!(
+                stdin_buffer_write,
+                "noteon {} {} {}",
+                channel, midi, velocity
+            )?;
+            stdin_buffer_write.flush()?;
         }
-    });
-
-    // CPAL crate: PCM->linux alsa(play the PCM)
-    let opt = Opt::parse();
-    let host = cpal_init_host(&opt);
-    let handle_cpal = thread::spawn(move || {
-        cpal_run(&opt, &host, consumer);
-    });
-
-    // wait for the thread to be done(break inner loop / return)
-    handle_keyboards.join().unwrap();
-    handle_render.join().unwrap();
-    handle_cpal.join().unwrap();
-
+        NoteStatus::NoteOff => {
+            writeln!(
+                stdin_buffer_write,
+                "noteoff {} {} {}",
+                channel, midi, velocity
+            )?;
+            stdin_buffer_write.flush()?;
+        }
+    };
     Ok(())
+}
+
+fn main() -> anyhow::Result<(), anyhow::Error> {
+    // init extra bin 'fluidsynth'(https://github.com/fluidsynth/fluidsynth)
+    let soundfont = "./TimGM6mb.sf2";
+    let mut child = Command::new("fluidsynth")
+        .args(["-a", "pipewire", "-n", soundfont])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .expect("Cannot connect 'FluidSynth' 's stdin");
+    let mut synth = BufWriter::new(stdin);
+
+    plat_note(&mut synth, NoteStatus::NoteOn, 0, 60, 100)?;
+
+    loop {}
+    writeln!(synth, "quit")?;
+    synth.flush()?;
+    drop(synth);
+    child.wait()?;
+    Ok(())
+
+    // // init a keyboard(virtual) Arc<Rwlock<_>>
+    // let keyboard_a = Arc::new(RwLock::new(KeyBoard::init(0)));
+
+    // // pick the keyboard device
+    // let device = pick_device();
+    // println!("picked the device:{}", device);
+
+    // // define a ringbuf for 'PCM' data (from 'handle_keyboards' to 'cpal_run')
+    // // The buffer to share samples
+    // let latency_frames = (STREAM_LATENCY as f32 / 1_000.0) * STREAM_SAMPLERATE as f32;
+    // let latency_samples = latency_frames as usize * STREAM_CHANNELS as usize;
+    // let pcm_ring = ringbuf::HeapRb::<f32>::new(latency_samples * 2);
+    // let (mut producer, consumer): (ProducerType, ConsumerType) = pcm_ring.split();
+
+    // // read event thread (read the event and send it to the
+    // // 'rustysynth' to render as PCM data and 'cpal' to
+    // // play the PCM data)
+    // let input_keyboard = Arc::clone(&keyboard_a);
+    // let handle_keyboards = thread::spawn(move || {
+    //     sync_keyboards(device, input_keyboard);
+    // });
+
+    // // 'rustysynth' crate => PCM data
+    // let mut sf2 = File::open("TimGM6mb.sf2").unwrap();
+    // let sound_font = Arc::new(SoundFont::new(&mut sf2).unwrap());
+    // // create the synthesizer
+    // let settings = SynthesizerSettings::new(STREAM_SAMPLERATE as i32);
+    // let mut synthesizer = Synthesizer::new(&sound_font, &settings).unwrap();
+    // let output_keyboard = Arc::clone(&keyboard_a);
+    // let handle_render = thread::spawn(move || {
+    //     loop {
+    //         // read the hashmap of keyboard,base on it to play notes
+    //         let mut keyboard_hashmap: HashMap<KeyCode, KeyStatus> = HashMap::new();
+    //         match output_keyboard.try_read() {
+    //             Ok(guard) => {
+    //                 let tmp = guard.keys_status_set.clone();
+    //                 keyboard_hashmap = tmp;
+    //             }
+    //             Err(_) => {
+    //                 println!("####[debug]try_read() \"keyboard\" failed in handle render");
+    //             }
+    //         }
+
+    //         // for each key, base on its status to play some notes?
+    //         for (key, value) in keyboard_hashmap.iter() {
+    //             match *key {
+    //                 KeyCode::KEY_1 if *value == KeyStatus::KeyDown => {
+    //                     let pcm: PcmData = generate_a_note_to_pcm(0, 40, 100, &mut synthesizer);
+    //                     let pcm_raw = pcm.generate_pcm();
+    //                     producer.push_slice(&pcm_raw);
+    //                 }
+    //                 KeyCode::KEY_2 if *value == KeyStatus::KeyDown => {
+    //                     let pcm: PcmData = generate_a_note_to_pcm(0, 50, 100, &mut synthesizer);
+    //                     let pcm_raw = pcm.generate_pcm();
+    //                     producer.push_slice(&pcm_raw);
+    //                 }
+    //                 KeyCode::KEY_3 if *value == KeyStatus::KeyDown => {
+    //                     let pcm: PcmData = generate_a_note_to_pcm(0, 60, 100, &mut synthesizer);
+    //                     let pcm_raw = pcm.generate_pcm();
+    //                     producer.push_slice(&pcm_raw);
+    //                 }
+    //                 KeyCode::KEY_4 if *value == KeyStatus::KeyDown => {
+    //                     let pcm: PcmData = generate_a_note_to_pcm(0, 70, 100, &mut synthesizer);
+    //                     let pcm_raw = pcm.generate_pcm();
+    //                     producer.push_slice(&pcm_raw);
+    //                 }
+    //                 _ => {}
+    //             }
+    //         }
+    //     }
+    // });
+
+    // // CPAL crate: PCM->linux alsa(play the PCM)
+    // let opt = Opt::parse();
+    // let host = cpal_init_host(&opt);
+    // let handle_cpal = thread::spawn(move || {
+    //     cpal_run(&opt, &host, consumer);
+    // });
+
+    // // wait for the thread to be done(break inner loop / return)
+    // handle_keyboards.join().unwrap();
+    // handle_render.join().unwrap();
+    // handle_cpal.join().unwrap();
+
+    // Ok(())
 }
 
 fn cpal_init_host(opt: &Opt) -> cpal::Host {
