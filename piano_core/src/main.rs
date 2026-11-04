@@ -48,25 +48,46 @@ const STREAM_SAMPLERATE: usize = 44100;
 const STREAM_LATENCY: usize = 150; // latency (ms)
 
 #[derive(Debug, Clone)]
+struct KeyBoardPair {
+    keyboard_a: KeyBoard,
+    keyboard_b: KeyBoard,
+}
+
+impl KeyBoardPair {
+    pub fn init() -> Self {
+        Self {
+            keyboard_a: KeyBoard::init(0),
+            keyboard_b: KeyBoard::init(1),
+        }
+    }
+    pub fn get_midi_from_keycode(&self, key_code: &evdev::KeyCode) -> Option<&usize> {
+        self.keyboard_a
+            .keycode_midi_map
+            .get(&key_code)
+            .or_else(|| self.keyboard_b.keycode_midi_map.get(&key_code))
+    }
+}
+
+#[derive(Debug, Clone)]
 struct KeyBoard {
     // we need id to classified two different keyboards
     id: usize,
     // a hashmap that store all the status of the keyboard
-    keys_status_set: HashMap<evdev::KeyCode, usize>,
+    keycode_midi_map: HashMap<evdev::KeyCode, usize>,
 }
 
 impl KeyBoard {
     pub fn init(id: usize) -> Self {
         Self {
             id: id,
-            keys_status_set: HashMap::from([
-                (KeyCode::KEY_1, 1),
-                (KeyCode::KEY_2, 2),
-                (KeyCode::KEY_3, 3),
-                (KeyCode::KEY_4, 4),
-                (KeyCode::KEY_5, 5),
-                (KeyCode::KEY_6, 6),
-                (KeyCode::KEY_7, 7),
+            keycode_midi_map: HashMap::from([
+                (KeyCode::KEY_1, 60),
+                (KeyCode::KEY_2, 62),
+                (KeyCode::KEY_3, 64),
+                (KeyCode::KEY_4, 66),
+                (KeyCode::KEY_5, 68),
+                (KeyCode::KEY_6, 70),
+                (KeyCode::KEY_7, 72),
             ]),
         }
     }
@@ -289,20 +310,36 @@ fn play_note(
 
 fn playing(
     rx: Receiver<KeyEvent>,
-    synth: BufWriter<ChildStdin>,
+    mut synth: &mut BufWriter<ChildStdin>,
+    my_keyboards: &KeyBoardPair,
 ) -> anyhow::Result<(), anyhow::Error> {
     loop {
         match rx.recv() {
             Ok(key_ev) => match key_ev {
-                KeyEvent::KeyPressed(key) => {}
-                KeyEvent::KeyReleased(key) => {}
+                KeyEvent::KeyPressed(keycode) => {
+                    let midi = match my_keyboards.get_midi_from_keycode(&keycode) {
+                        Some(midi) => midi,
+                        None => {
+                            continue;
+                        }
+                    };
+                    play_note(&mut synth, NoteStatus::NoteOn, 0, midi.clone(), 100)?;
+                }
+                KeyEvent::KeyReleased(keycode) => {
+                    let midi = match my_keyboards.get_midi_from_keycode(&keycode) {
+                        Some(midi) => midi,
+                        None => {
+                            continue;
+                        }
+                    };
+                    play_note(&mut synth, NoteStatus::NoteOff, 0, midi.clone(), 100)?;
+                }
             },
             Err(err) => {
                 return Err(err.into());
             }
         }
     }
-    Ok(())
 }
 
 fn main() -> anyhow::Result<(), anyhow::Error> {
@@ -311,6 +348,7 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     // // init a keyboard(virtual) Arc<Rwlock<_>>
     // let keyboard_a = Arc::new(RwLock::new(KeyBoard::init(0)));
     // pick the keyboard device
+    let my_keyboards = KeyBoardPair::init();
     let device = pick_device();
     println!("picked the device:{}", device);
 
@@ -320,7 +358,7 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
         .args(["-a", "pipewire", "-n", soundfont])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()?;
     let stdin = child
         .stdin
@@ -346,11 +384,12 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     });
 
     let handle_playing = thread::spawn(move || {
-        playing(rx, synth).unwrap();
+        playing(rx, &mut synth, &my_keyboards).unwrap();
     });
 
     // wait for the thread to be done(break inner loop / return)
     handle_keyboards.join().unwrap();
+    handle_playing.join().unwrap();
     // // quit the 'fluidsynth'
     // writeln!(synth, "quit")?;
     // synth.flush()?;
