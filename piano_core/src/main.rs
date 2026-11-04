@@ -15,7 +15,10 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     process::{ChildStdin, Command, Stdio},
-    sync::{Arc, RwLock},
+    sync::{
+        mpsc::{Receiver, Sender},
+        Arc, RwLock,
+    },
     thread::{self},
     time::Duration,
 };
@@ -49,18 +52,23 @@ struct KeyBoard {
     // we need id to classified two different keyboards
     id: usize,
     // a hashmap that store all the status of the keyboard
-    keys_status_set: HashMap<evdev::KeyCode, KeyStatus>,
+    keys_status_set: HashMap<evdev::KeyCode, usize>,
 }
 
 impl KeyBoard {
     pub fn init(id: usize) -> Self {
         Self {
             id: id,
-            keys_status_set: HashMap::<evdev::KeyCode, KeyStatus>::new(),
+            keys_status_set: HashMap::from([
+                (KeyCode::KEY_1, 1),
+                (KeyCode::KEY_2, 2),
+                (KeyCode::KEY_3, 3),
+                (KeyCode::KEY_4, 4),
+                (KeyCode::KEY_5, 5),
+                (KeyCode::KEY_6, 6),
+                (KeyCode::KEY_7, 7),
+            ]),
         }
-    }
-    pub fn update_keyboard(&mut self, key: evdev::KeyCode, status: KeyStatus) {
-        self.keys_status_set.insert(key, status);
     }
 }
 
@@ -84,6 +92,12 @@ enum KeyStatus {
     KeyUp,
     KeyDown,
     KeyPressed,
+}
+
+#[derive(Debug)]
+enum KeyEvent {
+    KeyPressed(KeyCode),
+    KeyReleased(KeyCode),
 }
 
 #[derive(Debug, Clone)]
@@ -117,31 +131,25 @@ impl PcmData {
 
 fn pick_device() -> evdev::Device {
     println!("pick device!");
-    let mut args = std::env::args_os(); // get the command line args
-    args.next(); // skip the first arg in command line
-    if let Some(a_device) = args.next() {
-        evdev::Device::open(a_device).unwrap()
-    } else {
-        // no device is specified, so we enumerate all and
-        // let the user to choose one
-
-        // enumerate all the devices
-        let devices = evdev::enumerate()
-            .map(|device| device.1)
-            .collect::<Vec<_>>();
-        for (i, device) in devices.iter().enumerate() {
-            println!("found NO.{} device:{}", i, device);
-        }
-        println!("please select your device [0-{}]", devices.len() - 1);
-        let _ = std::io::stdout().flush(); // flush all stdout, cut noise
-        let mut chosen = String::new();
-        let _ = std::io::stdin().read_line(&mut chosen);
-        let index = chosen.trim().parse::<usize>().unwrap();
-        devices.into_iter().nth(index).unwrap()
+    // enumerate all the devices
+    let devices = evdev::enumerate()
+        .map(|device| device.1)
+        .collect::<Vec<_>>();
+    for (i, device) in devices.iter().enumerate() {
+        println!("found NO.{} device:{}", i, device);
     }
+    println!("please select your device [0-{}]", devices.len() - 1);
+    let _ = std::io::stdout().flush(); // flush all stdout, cut noise
+    let mut chosen = String::new();
+    let _ = std::io::stdin().read_line(&mut chosen);
+    let index = chosen.trim().parse::<usize>().unwrap();
+    devices.into_iter().nth(index).unwrap()
 }
 
-fn sync_keyboards(mut device: evdev::Device, keyboard: Arc<RwLock<KeyBoard>>) {
+fn listen_keyboards(
+    tx: Sender<KeyEvent>,
+    mut device: evdev::Device,
+) -> anyhow::Result<(), anyhow::Error> {
     // set the device(like a kind of fd) as nonblocking
     let _ = device.set_nonblocking(true);
 
@@ -157,25 +165,42 @@ fn sync_keyboards(mut device: evdev::Device, keyboard: Arc<RwLock<KeyBoard>>) {
         match device.fetch_events() {
             Ok(ev_iter) => {
                 for ev in ev_iter {
-                    if ev.event_type() == evdev::EventType::KEY {
-                        // println!("ev.value()={:?}", ev.value());
-                        // println!("ev.code()={:?}", ev.code());
-                        match keyboard.try_write() {
-                            Ok(mut guard) => {
-                                guard.update_keyboard(
-                                    evdev::KeyCode(ev.code()),
-                                    ev.value().try_into().unwrap(),
-                                );
-                            }
-                            Err(_) => {
-                                println!(
-                                    "####[debug]try_write() \"keyboard\" failed in handle render"
-                                );
-                            }
+                    match ev.event_type() {
+                        evdev::EventType::KEY => {
+                            match ev.value() {
+                                0_i32 => {
+                                    tx.send(KeyEvent::KeyReleased(evdev::KeyCode(ev.code())))?
+                                }
+                                1_i32 => {
+                                    tx.send(KeyEvent::KeyPressed(evdev::KeyCode(ev.code())))?
+                                }
+                                2_i32 => {}
+                                _ => {
+                                    return Err(anyhow::Error::msg(
+                                        "Unknown key value".to_string(),
+                                    ));
+                                }
+                            };
+                            println!("ev.value()={:?}", ev.value());
+                            println!("ev.code()={:?}", ev.code());
+                            // match keyboard.try_write() {
+                            //     Ok(mut guard) => {
+                            //         guard.update_keyboard(
+                            //             evdev::KeyCode(ev.code()),
+                            //             ev.value().try_into().unwrap(),
+                            //         );
+                            //     }
+                            //     Err(_) => {
+                            //         println!(
+                            //         "####[debug]try_write() \"keyboard\" failed in handle render"
+                            //     );
+                            //     }
+                            // }
+                            // just maintain the "keyboard" struct to share with the 'rustysynth' for
+                            // rendering the PCM data
+                            // println!("####[debug]keyboard={:?}", keyboard);
                         }
-                        // just maintain the "keyboard" struct to share with the 'rustysynth' for
-                        // rendering the PCM data
-                        println!("####[debug]keyboard={:?}", keyboard);
+                        _ => {}
                     }
                 }
             }
@@ -184,8 +209,7 @@ fn sync_keyboards(mut device: evdev::Device, keyboard: Arc<RwLock<KeyBoard>>) {
                 epoll.wait(&mut events, PollTimeout::NONE).unwrap();
             }
             Err(e) => {
-                println!("err:{e}");
-                break;
+                return Err(anyhow::Error::msg(format!("err:{e}")));
             }
         }
     }
@@ -235,7 +259,7 @@ enum NoteStatus {
     NoteOff,
 }
 
-fn plat_note(
+fn play_note(
     stdin_buffer_write: &mut BufWriter<ChildStdin>,
     note_status: NoteStatus,
     channel: usize,
@@ -263,14 +287,40 @@ fn plat_note(
     Ok(())
 }
 
+fn playing(
+    rx: Receiver<KeyEvent>,
+    synth: BufWriter<ChildStdin>,
+) -> anyhow::Result<(), anyhow::Error> {
+    loop {
+        match rx.recv() {
+            Ok(key_ev) => match key_ev {
+                KeyEvent::KeyPressed(key) => {}
+                KeyEvent::KeyReleased(key) => {}
+            },
+            Err(err) => {
+                return Err(err.into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<(), anyhow::Error> {
-    // init extra bin 'fluidsynth'(https://github.com/fluidsynth/fluidsynth)
+    // init a non-border channel
+    let (tx, rx) = std::sync::mpsc::channel::<KeyEvent>();
+    // // init a keyboard(virtual) Arc<Rwlock<_>>
+    // let keyboard_a = Arc::new(RwLock::new(KeyBoard::init(0)));
+    // pick the keyboard device
+    let device = pick_device();
+    println!("picked the device:{}", device);
+
+    // load extra bin 'fluidsynth'(https://github.com/fluidsynth/fluidsynth)
     let soundfont = "./TimGM6mb.sf2";
     let mut child = Command::new("fluidsynth")
         .args(["-a", "pipewire", "-n", soundfont])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::null())
         .spawn()?;
     let stdin = child
         .stdin
@@ -278,21 +328,7 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
         .expect("Cannot connect 'FluidSynth' 's stdin");
     let mut synth = BufWriter::new(stdin);
 
-    plat_note(&mut synth, NoteStatus::NoteOn, 0, 60, 100)?;
-
-    loop {}
-    writeln!(synth, "quit")?;
-    synth.flush()?;
-    drop(synth);
-    child.wait()?;
-    Ok(())
-
-    // // init a keyboard(virtual) Arc<Rwlock<_>>
-    // let keyboard_a = Arc::new(RwLock::new(KeyBoard::init(0)));
-
-    // // pick the keyboard device
-    // let device = pick_device();
-    // println!("picked the device:{}", device);
+    play_note(&mut synth, NoteStatus::NoteOn, 0, 60, 100)?;
 
     // // define a ringbuf for 'PCM' data (from 'handle_keyboards' to 'cpal_run')
     // // The buffer to share samples
@@ -301,13 +337,26 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     // let pcm_ring = ringbuf::HeapRb::<f32>::new(latency_samples * 2);
     // let (mut producer, consumer): (ProducerType, ConsumerType) = pcm_ring.split();
 
-    // // read event thread (read the event and send it to the
-    // // 'rustysynth' to render as PCM data and 'cpal' to
-    // // play the PCM data)
+    // read event thread (read the event and send it to the
+    // 'rustysynth' to render as PCM data and 'cpal' to
+    // play the PCM data)
     // let input_keyboard = Arc::clone(&keyboard_a);
-    // let handle_keyboards = thread::spawn(move || {
-    //     sync_keyboards(device, input_keyboard);
-    // });
+    let handle_keyboards = thread::spawn(move || {
+        listen_keyboards(tx, device).unwrap();
+    });
+
+    let handle_playing = thread::spawn(move || {
+        playing(rx, synth).unwrap();
+    });
+
+    // wait for the thread to be done(break inner loop / return)
+    handle_keyboards.join().unwrap();
+    // // quit the 'fluidsynth'
+    // writeln!(synth, "quit")?;
+    // synth.flush()?;
+    // drop(synth);
+    child.wait()?;
+    Ok(())
 
     // // 'rustysynth' crate => PCM data
     // let mut sf2 = File::open("TimGM6mb.sf2").unwrap();
@@ -365,13 +414,8 @@ fn main() -> anyhow::Result<(), anyhow::Error> {
     // let handle_cpal = thread::spawn(move || {
     //     cpal_run(&opt, &host, consumer);
     // });
-
-    // // wait for the thread to be done(break inner loop / return)
-    // handle_keyboards.join().unwrap();
     // handle_render.join().unwrap();
     // handle_cpal.join().unwrap();
-
-    // Ok(())
 }
 
 fn cpal_init_host(opt: &Opt) -> cpal::Host {
