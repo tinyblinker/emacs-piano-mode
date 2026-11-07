@@ -1,0 +1,8 @@
+#!/bin/sh
+# Test stand-in for the real piano-keys binary: emits one scripted
+# down/up pair, then idles until killed.
+sleep 0.2
+echo "down A"
+sleep 0.2
+echo "up A"
+sleep 60
