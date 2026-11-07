@@ -253,15 +253,16 @@ to the input group (or grant udev uaccess access) and try again"))
 (defun piano-select-device ()
   "Choose the keyboard device for `piano-mode' and save the choice."
   (interactive)
-  (let ((program (or (piano--find-keys-program)
-                     (user-error "Key reader piano-keys not found (%S)"
-                                 piano-keys-program))))
-    ;; Rebinding piano-device forces a fresh prompt instead of reusing
-    ;; the saved value.
-    (let* ((piano-device nil)
-           (device (piano--select-device program)))
-      (customize-save-variable 'piano-device device)
-      (message "Piano keyboard device: %s" (or device "auto-detect")))))
+  (let* ((piano-device nil)              ; force a fresh prompt
+         (program (or (piano--find-keys-program)
+                      (user-error "Key reader piano-keys not found (%S)"
+                                  piano-keys-program)))
+         (device (piano--select-device program)))
+    (customize-save-variable 'piano-device device)
+    ;; A running reader still reads the old device: restart it so the
+    ;; new choice takes effect immediately.
+    (piano--restart-helper)
+    (message "Piano keyboard device: %s" (or device "auto-detect"))))
 
 (defun piano--helper-active-p ()
   "Return non-nil when the piano buffer exists and has focus.
@@ -340,6 +341,15 @@ in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-pro
              :stderr (get-buffer-create " *piano-keys-errors*")
              :filter #'piano--keys-filter
              :sentinel #'piano--keys-sentinel)))))
+
+(defun piano--restart-helper ()
+  "Restart the key reader, if it is running, with the current device."
+  (when (process-live-p piano--keys-process)
+    (piano--all-notes-off)              ; keys held on the old device
+    (let ((piano--stopping t))          ; keep the sentinel quiet
+      (delete-process piano--keys-process))
+    (setq piano--keys-process nil)
+    (piano--start-helper)))
 
 (defun piano--window-changed (window)
   "Release all notes when WINDOW stops showing the piano buffer."

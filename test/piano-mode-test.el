@@ -197,4 +197,40 @@ Return PREDICATE's final value."
       (should (equal (piano--select-device "piano-keys") nil))
       (should (eq saved 'unset)))))
 
+(ert-deftest piano-test-restart-helper ()
+  "Restarting the reader picks up a changed `piano-device'."
+  (piano-test-environment
+    (with-temp-buffer
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((piano--piano-buffer (current-buffer)))
+        (piano-mode 1)
+        (unwind-protect
+            (let ((old piano--keys-process))
+              (should (process-live-p old))
+              (setq piano-device "/dev/input/event9")
+              (piano--restart-helper)
+              (should (process-live-p piano--keys-process))
+              (should-not (eq old piano--keys-process))
+              (should (member "--device" (process-command piano--keys-process)))
+              (should (member "/dev/input/event9"
+                              (process-command piano--keys-process))))
+          (piano-mode -1))))))
+
+(ert-deftest piano-test-select-device-command ()
+  "The select-device command saves the pick and restarts the reader."
+  (let ((saved 'unset)
+        (restarted nil)
+        (piano-device nil))
+    (cl-letf (((symbol-function 'piano--find-keys-program)
+               (lambda () "piano-keys"))
+              ((symbol-function 'piano--select-device)
+               (lambda (_program) "/dev/input/event5"))
+              ((symbol-function 'customize-save-variable)
+               (lambda (_symbol value) (setq saved value)))
+              ((symbol-function 'piano--restart-helper)
+               (lambda () (setq restarted t))))
+      (piano-select-device)
+      (should (equal saved "/dev/input/event5"))
+      (should restarted))))
+
 ;;; piano-mode-test.el ends here
