@@ -12,7 +12,7 @@
 ;; tracking.
 ;;
 ;; The companion `piano-keys' program (Rust, zero dependencies) reads
-;; raw key state on Linux -- X11 or the evdev ABI -- without root or
+;; raw key state from the kernel evdev ABI on Linux without root or
 ;; `input' group membership, and reports "down KEY" / "up KEY" lines
 ;; to Emacs.  Emacs maps them to MIDI notes and drives a persistent
 ;; FluidSynth process.
@@ -58,7 +58,8 @@ Key names are single letters, digits or punctuation accepted by the
 
 (defcustom piano-keys-extra-args nil
   "Extra arguments passed to `piano-keys-program'.
-For example (\"--backend\" \"x11\") forces the X11 backend on Linux."
+For example (\"--device\" \"/dev/input/event3\") pins one keyboard
+device."
   :type '(repeat string))
 
 (defcustom piano-device nil
@@ -183,10 +184,19 @@ self-insert while the helper listens globally.")
   "Return the --keys argument derived from `piano-keys'."
   (mapconcat (lambda (binding) (upcase (car binding))) piano-keys ","))
 
-(defvar piano--device nil
-  "Device path chosen for this Emacs session, nil for auto-detection.")
-(defvar piano--device-chosen nil
-  "Non-nil once the device choice has been made this session.")
+(defun piano--find-keys-program ()
+  "Return the piano-keys executable, or nil.
+
+Checks `piano-keys-program' on the search path, and also the build
+outputs inside this repository, so loading the package straight from
+a checkout just works."
+  (or (executable-find piano-keys-program)
+      (when piano--load-dir
+        (seq-find #'file-executable-p
+                  (list (expand-file-name "piano_core/target/release/piano-keys"
+                                          piano--load-dir)
+                        (expand-file-name "piano_core/target/debug/piano-keys"
+                                          piano--load-dir))))))
 
 (defun piano--parse-devices (text)
   "Return an alist of (LABEL . PATH) for the keyboard lines in TEXT."
@@ -205,51 +215,62 @@ self-insert while the helper listens globally.")
 (defun piano--list-devices (program)
   "Return an alist of (LABEL . PATH) for the keyboards PROGRAM reports."
   (with-temp-buffer
+    ;; stdout and stderr both land here, so a failure's stderr becomes
+    ;; part of the error message below.
     (unless (zerop (call-process program nil t nil "--list-devices"))
-      (user-error "Listing keyboards with %S failed" program))
+      (user-error
+       "Listing keyboards failed (%s); check read access to /dev/input \
+(udev uaccess or the input group)"
+       (string-trim (buffer-string))))
     (piano--parse-devices (buffer-string))))
 
 (defun piano--select-device (program)
   "Return the evdev device path to use, or nil for auto-detection.
 
-Uses `piano-device' when set; otherwise asks PROGRAM for its
-keyboards and lets the user pick one, asking only once per session."
-  (cond ((and (stringp piano-device) (not (string-empty-p piano-device)))
-         piano-device)
-        (piano--device-chosen piano--device)
-        (t
-         (let ((devices (piano--list-devices program)))
-           (cond ((null devices)
-                  (user-error "No keyboard device found by %S" program))
-                 ((null (cdr devices))
-                  (setq piano--device (cdar devices)))
-                 (t
-                  (let* ((choices (cons "Auto-detect (first match)"
-                                        (mapcar #'car devices)))
-                         (choice (completing-read "Keyboard device: " choices nil t)))
-                    (unless (string-prefix-p "Auto-detect" choice)
-                      (setq piano--device (cdr (assoc choice devices)))))))
-           (setq piano--device-chosen t)
-           piano--device))))
+Uses `piano-device' when set.  Otherwise asks PROGRAM for its
+keyboards and lets the user pick one; the pick is saved to
+`piano-device', so the prompt appears only once."
+  (if (and (stringp piano-device) (not (string-empty-p piano-device)))
+      piano-device
+    (let ((devices (piano--list-devices program)))
+      (cond ((null devices)
+             (user-error
+              "No readable keyboard found under /dev/input; add yourself \
+to the input group (or grant udev uaccess access) and try again"))
+            ((null (cdr devices))
+             ;; Only one keyboard: use it without asking.
+             (cdar devices))
+            (t
+             (let* ((choices (cons "Auto-detect (first match)"
+                                   (mapcar #'car devices)))
+                    (choice (completing-read "Keyboard device: " choices nil t)))
+               (unless (string-prefix-p "Auto-detect" choice)
+                 (let ((path (cdr (assoc choice devices))))
+                   (customize-save-variable 'piano-device path)
+                   (message "Piano keyboard device saved: %s" path)
+                   path))))))))
 
 (defun piano-select-device ()
   "Choose the keyboard device for `piano-mode' and save the choice."
   (interactive)
-  (let ((program (or (executable-find piano-keys-program)
-                     (user-error "Key reader piano-keys not found (%S)"
-                                 piano-keys-program))))
-    (setq piano--device-chosen nil)
-    (let ((device (piano--select-device program)))
-      (customize-save-variable 'piano-device device)
-      (message "Piano keyboard device: %s" (or device "auto-detect")))))
+  (let* ((piano-device nil)              ; force a fresh prompt
+         (program (or (piano--find-keys-program)
+                      (user-error "Key reader piano-keys not found (%S)"
+                                  piano-keys-program)))
+         (device (piano--select-device program)))
+    (customize-save-variable 'piano-device device)
+    ;; A running reader still reads the old device: restart it so the
+    ;; new choice takes effect immediately.
+    (piano--restart-helper)
+    (message "Piano keyboard device: %s" (or device "auto-detect"))))
 
 (defun piano--helper-active-p ()
-  "Return non-nil when key-reader events should be processed.
+  "Return non-nil when the piano buffer exists and has focus.
 
-Events are only processed while the piano buffer has focus, so other
-buffers keep normal typing."
-  (or (null piano--piano-buffer)
-      (eq (window-buffer (selected-window)) piano--piano-buffer)))
+Events are only processed while the dedicated piano buffer is shown
+in the selected window, so other buffers keep normal typing."
+  (and piano--piano-buffer
+       (eq (window-buffer (selected-window)) piano--piano-buffer)))
 
 (defun piano--apply-key-event (action key)
   "Turn an ACTION (\"down\"/\"up\") event for KEY into note-on/note-off."
@@ -287,6 +308,7 @@ kept in a process property until they are finished."
     (when (eq process piano--keys-process)
       (setq piano--keys-process nil))
     (unless piano--stopping
+      (piano--all-notes-off)
       (let ((tail (string-trim (with-current-buffer " *piano-keys-errors*"
                                  (buffer-string)))))
         (message "The piano-keys reader exited: %s"
@@ -296,7 +318,7 @@ kept in a process property until they are finished."
   "Start the native key reader."
   (unless (process-live-p piano--keys-process)
     (let* ((program
-            (or (executable-find piano-keys-program)
+            (or (piano--find-keys-program)
                 (user-error
                  "Key reader piano-keys not found (%S); run \"cargo build --release\" \
 in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-program'"
@@ -320,8 +342,17 @@ in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-pro
              :filter #'piano--keys-filter
              :sentinel #'piano--keys-sentinel)))))
 
+(defun piano--restart-helper ()
+  "Restart the key reader, if it is running, with the current device."
+  (when (process-live-p piano--keys-process)
+    (piano--all-notes-off)              ; keys held on the old device
+    (let ((piano--stopping t))          ; keep the sentinel quiet
+      (delete-process piano--keys-process))
+    (setq piano--keys-process nil)
+    (piano--start-helper)))
+
 (defun piano--window-changed (window)
-  "Release all notes when WINDOW's buffer stops being the piano buffer."
+  "Release all notes when WINDOW stops showing the piano buffer."
   (let ((focused (and piano--piano-buffer
                       (eq (window-buffer window) piano--piano-buffer))))
     (when (and piano--focused-p (not focused))
@@ -386,7 +417,9 @@ set `piano-soundfont'"))))
   "Start the synthesizer and the key reader."
   (piano--start-synth)
   (piano--start-helper)
-  (add-hook 'window-buffer-change-functions #'piano--window-changed))
+  (add-hook 'window-buffer-change-functions #'piano--window-changed)
+  ;; Record the focus state now: the hook above only fires on changes.
+  (setq piano--focused-p (piano--helper-active-p)))
 
 (defun piano--stop ()
   "Stop the key reader, release all notes, stop the synthesizer."
@@ -422,7 +455,9 @@ set `piano-soundfont'"))))
       (condition-case error
           (piano--start)
         (error
+         ;; A failed start must not leak the synthesizer process.
          (setq piano-mode nil)
+         (piano--stop)
          (signal (car error) (cdr error))))
     (piano--stop)))
 
@@ -431,20 +466,28 @@ set `piano-soundfont'"))))
   "Open a dedicated piano buffer and start playing."
   (interactive)
   (let ((buffer (get-buffer-create "*piano*")))
-    (with-current-buffer buffer
-      (unless (derived-mode-p 'special-mode)
-        (special-mode))
-      (piano--show-keys))
     (pop-to-buffer buffer)
     (setq piano--piano-buffer buffer)
     (add-hook 'kill-buffer-hook #'piano--kill-buffer nil t)
-    (piano-mode 1)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'special-mode)
+        (special-mode)))
+    ;; Enable the mode first: the device prompt (if any) must finish
+    ;; before the header below shows which device is active.
+    (piano-mode 1)
+    (with-current-buffer buffer
+      (piano--show-keys))))
 
 (defun piano--show-keys ()
   "Insert the current key layout into the current buffer."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "piano-mode — the keys below are read globally by piano-keys\n"
+            (format "device: %s\n"
+                    (if (and (stringp piano-device)
+                             (not (string-empty-p piano-device)))
+                        piano-device
+                      "auto-detect"))
             "white keys: "
             (mapconcat (lambda (binding) (upcase (car binding)))
                        piano-keys " ")
@@ -464,15 +507,19 @@ set `piano-soundfont'"))))
     (run-at-time 0.8 nil #'piano--note-off note)))
 
 (defun piano--doctor-devices ()
-  "Return a line about /dev/input visibility."
-  (let ((devices (ignore-errors
-                   (directory-files "/dev/input" t "^event[0-9]+$"))))
-    (cond ((null devices)
-           "  devices:   no /dev/input/event* devices visible\n")
-          ((seq-some #'file-readable-p devices)
-           "  devices:   keyboard event devices are readable\n")
-          (t
-           "  devices:   event devices exist but are NOT readable (join the input group or add a udev uaccess rule)\n"))))
+  "Return lines listing the readable keyboards and the active choice."
+  (let* ((program (piano--find-keys-program))
+         (devices (and program (ignore-errors (piano--list-devices program)))))
+    (if (null devices)
+        "  keyboards: none readable; check /dev/input access (udev uaccess or the input group)\n"
+      (concat
+       "  keyboards:\n"
+       (mapconcat (lambda (cell) (format "    - %s\n" (car cell))) devices "")
+       (format "  chosen:    %s\n"
+               (if (and (stringp piano-device)
+                        (not (string-empty-p piano-device)))
+                   piano-device
+                 "auto-detect"))))))
 
 (defun piano--doctor-tail (buffer-name)
   "Return the last stderr of BUFFER-NAME, or an empty string."
@@ -486,7 +533,7 @@ set `piano-soundfont'"))))
   "Build the diagnostic report string."
   (let* ((synth (executable-find piano-synth-program))
          (soundfont (piano--soundfont))
-         (keys (executable-find piano-keys-program))
+         (keys (piano--find-keys-program))
          (synth-live (and piano--synth-process
                           (process-live-p piano--synth-process)))
          (keys-live (and piano--keys-process
@@ -497,7 +544,9 @@ set `piano-soundfont'"))))
      (format "  program:   %s\n"
              (or synth (format "%S is not installed" piano-synth-program)))
      (format "  soundfont: %s\n" (or soundfont "NOT FOUND"))
-     (format "  audio:     %s\n" (or piano-audio-driver "FluidSynth default"))
+     (format "  audio:     %s%s\n"
+             (or piano-audio-driver "FluidSynth default")
+             (if piano-audio-driver "" " (try \"pipewire\" if you hear nothing)"))
      (format "  process:   %s\n" (if synth-live "running" "not running"))
      (piano--doctor-tail " *piano-fluidsynth-errors*")
      "\nKey reader\n"

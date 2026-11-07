@@ -8,20 +8,16 @@
 //! ```
 //!
 //! Key state is polled, so key releases are detected with
-//! poll-interval latency.  Two zero-dependency backends are used:
-//!
-//! - X11: `XQueryKeymap` (libX11 loaded with dlopen) — no privileges.
-//! - evdev: the kernel input ABI from `/dev/input` — used under
-//!   Wayland, where XWayland only knows key state while an X11
-//!   client is focused.  Needs seat access (udev `uaccess`), which
-//!   normally requires no `input` group membership.
+//! poll-interval latency.  The reader talks straight to the kernel
+//! evdev ABI (`/dev/input/event*`), which is independent of X11 and
+//! Wayland; it only needs read access to the keyboard device (udev
+//! `uaccess` or the `input` group).
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("piano-keys supports Linux only");
 
 mod evdev;
 mod keys;
-mod x11;
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -33,102 +29,25 @@ const USAGE: &str = "\
 piano-keys — report keyboard press/release events on stdout (Linux)
 
 USAGE:
-  piano-keys [--keys K1,K2,...] [--poll-ms N] [--backend NAME]
-             [--device PATH] [--list-devices] [--help]
+  piano-keys [--keys K1,K2,...] [--poll-ms N] [--device PATH]
+             [--list-devices] [--help]
 
   --keys          comma-separated key names to watch
                   (default: every letter and digit)
   --poll-ms       polling interval in milliseconds, 1-100 (default: 4)
-  --backend       keyboard backend: x11, evdev or auto (default: auto)
-  --device        evdev device to use instead of auto-detection
-  --list-devices  list the event devices and exit
+  --device        keyboard device to use instead of auto-detection
+  --list-devices  list the keyboard devices and exit
+
+Requires read access to /dev/input (udev uaccess or the input group).
 
 OUTPUT, one line per state change:
   down A
   up A
 ";
 
-/// The selected keyboard backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Backend {
-    Auto,
-    X11,
-    Evdev,
-}
-
-impl Backend {
-    fn parse(name: &str) -> Result<Self, String> {
-        match name {
-            "auto" => Ok(Self::Auto),
-            "x11" => Ok(Self::X11),
-            "evdev" => Ok(Self::Evdev),
-            other => Err(format!(
-                "unknown backend {other:?} (expected x11, evdev or auto)"
-            )),
-        }
-    }
-}
-
-/// An open keyboard reader.
-enum Keyboard {
-    X11(x11::X11),
-    Evdev(evdev::Evdev),
-}
-
-impl Keyboard {
-    /// Open the backend selected by `choice` for the given key `names`.
-    /// `device` pins the evdev backend to one device file.
-    fn open(names: &[char], choice: Backend, device: Option<&Path>) -> Result<Self, String> {
-        match choice {
-            Backend::X11 => Ok(Self::X11(x11::X11::open(names)?)),
-            Backend::Evdev => Ok(Self::Evdev(open_evdev(names, device)?)),
-            Backend::Auto => {
-                if wayland_session() {
-                    // Wayland: prefer evdev, see the module docs above.
-                    Ok(Self::Evdev(open_evdev(names, device)?))
-                } else {
-                    match x11::X11::open(names) {
-                        Ok(x11) => Ok(Self::X11(x11)),
-                        Err(x11_error) => match open_evdev(names, device) {
-                            Ok(evdev) => Ok(Self::Evdev(evdev)),
-                            Err(evdev_error) => Err(format!(
-                                "x11 backend failed: {x11_error}; \
-evdev backend failed: {evdev_error}"
-                            )),
-                        },
-                    }
-                }
-            }
-        }
-    }
-
-    /// Poll the keyboard; returns one pressed flag per watched key.
-    fn poll(&mut self) -> Result<Vec<bool>, String> {
-        match self {
-            Self::X11(backend) => backend.poll(),
-            Self::Evdev(backend) => backend.poll(),
-        }
-    }
-}
-
-/// Open the evdev backend, pinned to `device` when given.
-fn open_evdev(names: &[char], device: Option<&Path>) -> Result<evdev::Evdev, String> {
-    match device {
-        Some(path) => evdev::open_device(path, names),
-        None => evdev::Evdev::autodetect(names),
-    }
-}
-
-/// Whether this looks like a native Wayland session.
-fn wayland_session() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some()
-        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|value| value == "wayland")
-}
-
 struct Args {
     keys: Vec<char>,
     poll_ms: u64,
-    backend: Backend,
     device: Option<String>,
     list_devices: bool,
 }
@@ -136,7 +55,6 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut keys = None;
     let mut poll_ms = DEFAULT_POLL_MS;
-    let mut backend = Backend::Auto;
     let mut device = None;
     let mut list_devices = false;
     let mut arguments = std::env::args().skip(1);
@@ -158,10 +76,6 @@ fn parse_args() -> Result<Args, String> {
                     return Err("--poll-ms must be between 1 and 100".into());
                 }
             }
-            "--backend" => {
-                let value = arguments.next().ok_or("--backend requires a value")?;
-                backend = Backend::parse(&value)?;
-            }
             "--device" => {
                 device = Some(arguments.next().ok_or("--device requires a value")?);
             }
@@ -176,7 +90,6 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         keys,
         poll_ms,
-        backend,
         device,
         list_devices,
     })
@@ -233,11 +146,11 @@ fn main() {
             }
         }
     }
-    let mut keyboard = match Keyboard::open(
-        &args.keys,
-        args.backend,
-        args.device.as_deref().map(Path::new),
-    ) {
+    let keyboard = match args.device.as_deref() {
+        Some(path) => evdev::open_device(Path::new(path), &args.keys),
+        None => evdev::Evdev::autodetect(&args.keys),
+    };
+    let mut keyboard = match keyboard {
         Ok(keyboard) => keyboard,
         Err(message) => {
             eprintln!("piano-keys: {message}");

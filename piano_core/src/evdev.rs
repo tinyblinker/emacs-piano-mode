@@ -1,11 +1,9 @@
 //! evdev backend: read the kernel input ABI from `/dev/input/event*`
 //! directly.
 //!
-//! This is the reliable backend under a native Wayland session, where
-//! XWayland only knows key state while an X11 client is focused.
-//! systemd-logind grants the active seat user read access to keyboard
-//! devices (udev `uaccess`), so the `input` group is normally not
-//! required.
+//! This works under X11 and Wayland alike, without any display server
+//! protocol.  The logged-in user can normally read keyboard devices
+//! (udev `uaccess`); the `input` group is the fallback.
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("the evdev backend assumes a 64-bit Linux ABI");
@@ -87,8 +85,7 @@ impl Evdev {
             }
         }
         Err("no readable keyboard device found under /dev/input; \
-grant your user access (udev uaccess or the input group) or try --backend x11 \
-(which works while an X11 window is focused)"
+grant your user read access (udev uaccess or the input group)"
             .into())
     }
 
@@ -190,6 +187,9 @@ fn c_string(bytes: &[u8]) -> String {
 pub fn open_device(path: &Path, names: &[char]) -> Result<Evdev, String> {
     let file =
         File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    if !is_keyboard(&file) {
+        return Err(format!("{} is not a keyboard device", path.display()));
+    }
     let fd = file.as_raw_fd();
     let codes = names
         .iter()

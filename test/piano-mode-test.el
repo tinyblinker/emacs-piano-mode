@@ -51,16 +51,18 @@ Return PREDICATE's final value."
   "A down/up pair from piano-keys becomes noteon/noteoff."
   (piano-test-environment
     (with-temp-buffer
-      (piano-mode 1)
-      (unwind-protect
-          (progn
-            (should (piano-test-wait-for
-                     (lambda ()
-                       (let ((log (piano-test-slurp piano-test-log)))
-                         (and (string-match-p "noteon 0 60 100" log)
-                              (string-match-p "noteoff 0 60" log))))))
-            (should (= 0 (hash-table-count piano--active))))
-        (piano-mode -1)))))
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((piano--piano-buffer (current-buffer)))
+        (piano-mode 1)
+        (unwind-protect
+            (progn
+              (should (piano-test-wait-for
+                       (lambda ()
+                         (let ((log (piano-test-slurp piano-test-log)))
+                           (and (string-match-p "noteon 0 60 100" log)
+                                (string-match-p "noteoff 0 60" log))))))
+              (should (= 0 (hash-table-count piano--active))))
+          (piano-mode -1))))))
 
 (ert-deftest piano-test-stop-kills-processes ()
   "Disabling the mode stops both helper processes."
@@ -81,7 +83,9 @@ Return PREDICATE's final value."
     (clrhash piano--active)
     (cl-letf (((symbol-function 'piano--synth-send)
                (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) calls))))
+                 (push (apply #'format format-string args) calls)))
+              ((symbol-function 'piano--helper-active-p)
+               (lambda () t)))
       (piano--handle-keys-line "down A")
       (piano--handle-keys-line "up A")
       (piano--handle-keys-line "down Q")
@@ -97,7 +101,9 @@ Return PREDICATE's final value."
     (clrhash piano--active)
     (cl-letf (((symbol-function 'piano--synth-send)
                (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) calls))))
+                 (push (apply #'format format-string args) calls)))
+              ((symbol-function 'piano--helper-active-p)
+               (lambda () t)))
       (piano--handle-keys-line "down A"))
     (should (member "noteon 0 62 100\n" calls))
     (should (member 62 (hash-table-keys piano--active)))))
@@ -106,6 +112,20 @@ Return PREDICATE's final value."
   "The --keys argument carries every mapped key, upcased."
   (should (equal (piano--helper-keys-argument)
                  "A,W,S,E,D,F,T,G,Y,H,U,J,K,O,L,P,;")))
+
+(ert-deftest piano-test-find-keys-program-repo ()
+  "A sibling build inside the repository is found without PATH."
+  (let ((dir (make-temp-file "piano-repo" t)))
+    (unwind-protect
+        (let* ((binary (expand-file-name "piano_core/target/debug/piano-keys" dir))
+               (piano--load-dir dir))
+          (make-directory (expand-file-name "piano_core/target/debug" dir) t)
+          (write-region "" nil binary)
+          (set-file-modes binary #o755)
+          (cl-letf (((symbol-function 'executable-find)
+                     (lambda (_name) nil)))
+            (should (equal (piano--find-keys-program) binary))))
+      (delete-directory dir t))))
 
 (ert-deftest piano-test-parse-devices ()
   "Keyboard lines in --list-devices output become (LABEL . PATH) pairs."
@@ -119,9 +139,7 @@ Return PREDICATE's final value."
 
 (ert-deftest piano-test-select-device-single ()
   "A single candidate device is picked without prompting."
-  (let ((piano-device nil)
-        (piano--device nil)
-        (piano--device-chosen nil))
+  (let ((piano-device nil))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("Only (/dev/input/event3)" . "/dev/input/event3")))))
@@ -129,10 +147,9 @@ Return PREDICATE's final value."
                      "/dev/input/event3")))))
 
 (ert-deftest piano-test-select-device-prompt ()
-  "With several candidates the completion choice wins."
+  "With several candidates the completion choice wins and is saved."
   (let ((piano-device nil)
-        (piano--device nil)
-        (piano--device-chosen nil))
+        (saved 'unset))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("Keyboard B (/dev/input/event5)" . "/dev/input/event5")
@@ -140,23 +157,80 @@ Return PREDICATE's final value."
               ((symbol-function 'completing-read)
                (lambda (_prompt choices &rest _args)
                  (should (member "Auto-detect (first match)" choices))
-                 "Keyboard A (/dev/input/event3)")))
+                 "Keyboard A (/dev/input/event3)"))
+              ((symbol-function 'customize-save-variable)
+               (lambda (_symbol value) (setq saved value))))
       (should (equal (piano--select-device "piano-keys")
-                     "/dev/input/event3")))))
+                     "/dev/input/event3"))
+      (should (equal saved "/dev/input/event3")))))
+
+(ert-deftest piano-test-select-device-pinned ()
+  "A saved `piano-device' is used without listing devices."
+  (let ((piano-device "/dev/input/event9"))
+    (should (equal (piano--select-device "piano-keys")
+                   "/dev/input/event9"))))
+
+(ert-deftest piano-test-helper-active-gate ()
+  "Key events are gated on the piano buffer existing and being focused."
+  (with-temp-buffer
+    (set-window-buffer (selected-window) (current-buffer))
+    (let ((piano--piano-buffer nil))
+      (should-not (piano--helper-active-p))       ; no piano buffer yet
+      (setq piano--piano-buffer (current-buffer))
+      (should (piano--helper-active-p))           ; piano buffer focused
+      (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+      (should-not (piano--helper-active-p)))))    ; focus moved away
 
 (ert-deftest piano-test-select-device-auto ()
-  "Choosing auto-detect yields nil, so no --device is passed."
+  "Choosing auto-detect yields nil and saves nothing."
   (let ((piano-device nil)
-        (piano--device nil)
-        (piano--device-chosen nil))
+        (saved 'unset))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("A (/dev/input/event3)" . "/dev/input/event3")
                    ("B (/dev/input/event5)" . "/dev/input/event5"))))
               ((symbol-function 'completing-read)
                (lambda (_prompt _choices &rest _args)
-                 "Auto-detect (first match)")))
+                 "Auto-detect (first match)"))
+              ((symbol-function 'customize-save-variable)
+               (lambda (_symbol value) (setq saved value))))
       (should (equal (piano--select-device "piano-keys") nil))
-      (should piano--device-chosen))))
+      (should (eq saved 'unset)))))
+
+(ert-deftest piano-test-restart-helper ()
+  "Restarting the reader picks up a changed `piano-device'."
+  (piano-test-environment
+    (with-temp-buffer
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((piano--piano-buffer (current-buffer)))
+        (piano-mode 1)
+        (unwind-protect
+            (let ((old piano--keys-process))
+              (should (process-live-p old))
+              (setq piano-device "/dev/input/event9")
+              (piano--restart-helper)
+              (should (process-live-p piano--keys-process))
+              (should-not (eq old piano--keys-process))
+              (should (member "--device" (process-command piano--keys-process)))
+              (should (member "/dev/input/event9"
+                              (process-command piano--keys-process))))
+          (piano-mode -1))))))
+
+(ert-deftest piano-test-select-device-command ()
+  "The select-device command saves the pick and restarts the reader."
+  (let ((saved 'unset)
+        (restarted nil)
+        (piano-device nil))
+    (cl-letf (((symbol-function 'piano--find-keys-program)
+               (lambda () "piano-keys"))
+              ((symbol-function 'piano--select-device)
+               (lambda (_program) "/dev/input/event5"))
+              ((symbol-function 'customize-save-variable)
+               (lambda (_symbol value) (setq saved value)))
+              ((symbol-function 'piano--restart-helper)
+               (lambda () (setq restarted t))))
+      (piano-select-device)
+      (should (equal saved "/dev/input/event5"))
+      (should restarted))))
 
 ;;; piano-mode-test.el ends here
