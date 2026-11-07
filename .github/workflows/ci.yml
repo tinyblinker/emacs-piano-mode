@@ -70,3 +70,11 @@ jobs:
           emacs --batch -Q
           --eval '(progn (require (quote checkdoc))
                          (checkdoc-file "piano-mode.el"))'
+
+      - name: package-lint
+        if: matrix.emacs == '31.1'
+        run: |
+          git clone --depth 1 https://github.com/purcell/package-lint
+          emacs --batch -Q -L package-lint \
+            -l package-lint/package-lint.el \
+            -f package-lint-batch-and-exit piano-mode.el
