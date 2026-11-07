@@ -39,13 +39,11 @@ Return PREDICATE's final value."
                (piano-keys-program "piano-keys")
                (piano-synth-program "fluidsynth")
                (piano-soundfont piano-test-soundfont)
-               (piano-input 'keys-helper)
                (piano-poll-ms 4)
                (process-environment
                 (cons (format "PIANO_SYNTH_LOG=%s" piano-test-log)
                       process-environment)))
            (clrhash piano--active)
-           (clrhash piano--timers)
            ,@body)
        (delete-file piano-test-log))))
 
@@ -103,30 +101,6 @@ Return PREDICATE's final value."
       (piano--handle-keys-line "down A"))
     (should (member "noteon 0 62 100\n" calls))
     (should (member 62 (hash-table-keys piano--active)))))
-
-(ert-deftest piano-test-emacs-keys-fallback ()
-  "Without the helper, mapped keys play with a timer release."
-  (let ((calls '())
-        (piano-input 'emacs-keys)
-        (piano-note-duration 0.2))
-    (clrhash piano--active)
-    (clrhash piano--timers)
-    (cl-letf (((symbol-function 'piano--synth-send)
-               (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) calls)))
-              ((symbol-function 'piano--start-synth)
-               (lambda ())))
-      (with-temp-buffer
-        (piano-mode 1)
-        (unwind-protect
-            (progn
-              (let ((last-command-event ?a))
-                (call-interactively #'piano-play-key))
-              (should (member "noteon 0 60 100\n" calls))
-              (sit-for 0.3)
-              (should (member "noteoff 0 60\n" calls))
-              (should (= 0 (hash-table-count piano--active))))
-          (piano-mode -1))))))
 
 (ert-deftest piano-test-keys-argument ()
   "The --keys argument carries every mapped key, upcased."

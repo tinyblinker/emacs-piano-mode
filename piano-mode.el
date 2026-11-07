@@ -12,11 +12,10 @@
 ;; tracking.
 ;;
 ;; The companion `piano-keys' program (Rust, zero dependencies) reads
-;; raw key state cross-platform -- X11 or evdev on Linux, user32 on
-;; Windows, CoreGraphics on macOS -- without root or `input' group
-;; membership, and reports "down KEY" / "up KEY" lines to Emacs.
-;; Emacs maps them to MIDI notes and drives a persistent FluidSynth
-;; process.
+;; raw key state on Linux -- X11 or the evdev ABI -- without root or
+;; `input' group membership, and reports "down KEY" / "up KEY" lines
+;; to Emacs.  Emacs maps them to MIDI notes and drives a persistent
+;; FluidSynth process.
 ;;
 ;; `M-x piano-play' opens the piano buffer and starts everything.
 
@@ -52,8 +51,7 @@ with `eval-buffer' or `load-file'.")
   "Alist mapping key names to MIDI note numbers.
 
 Key names are single letters, digits or punctuation accepted by the
-`piano-keys' program; letters and digits are portable across
-platforms."
+`piano-keys' program."
   :type '(alist :key-type string :value-type integer)
   :set (lambda (symbol value)
          (set-default symbol value)
@@ -73,22 +71,6 @@ For example (\"--backend\" \"x11\") forces the X11 backend on Linux."
   "Keyboard polling interval in milliseconds."
   :type 'integer)
 
-(defcustom piano-input 'auto
-  "Keyboard input source.
-`auto' uses `piano-keys-program' when it is available and falls
-back to Emacs key events (timer-based note release) otherwise."
-  :type '(choice (const auto) (const keys-helper) (const emacs-keys)))
-
-(defcustom piano-require-piano-buffer t
-  "When non-nil, ignore key-reader events unless the piano buffer is selected.
-This keeps letters typing normally in other buffers while the global
-key reader is running."
-  :type 'boolean)
-
-(defcustom piano-note-duration 0.5
-  "Note length in seconds for the `emacs-keys' input fallback."
-  :type 'number)
-
 (defcustom piano-transpose 0
   "Semitones added to every note."
   :type 'integer)
@@ -107,7 +89,7 @@ If nil, try `PIANO_SOUNDFONT' and common system locations."
   :type '(choice (const :tag "Auto-detect" nil) file))
 
 (defcustom piano-audio-driver nil
-  "FluidSynth audio driver, e.g. \"alsa\", \"pipewire\", \"coreaudio\".
+  "FluidSynth audio driver, e.g. \"alsa\" or \"pipewire\".
 Nil lets FluidSynth pick its default."
   :type '(choice (const :tag "FluidSynth default" nil) string))
 
@@ -119,8 +101,6 @@ Nil lets FluidSynth pick its default."
 ;; process), so these variables are not buffer-local.
 (defvar piano--active (make-hash-table :test #'eql)
   "MIDI notes currently sounding.")
-(defvar piano--timers (make-hash-table :test #'eql)
-  "Note-off timers for the `emacs-keys' fallback input.")
 (defvar piano--keys-process nil
   "The native key reader process.")
 (defvar piano--synth-process nil
@@ -172,34 +152,10 @@ Nil lets FluidSynth pick its default."
            piano--active)
   (clrhash piano--active))
 
-(defun piano--emacs-key-note ()
-  "Play the note bound to the key that invoked this command.
-
-Used by the `emacs-keys' fallback input; releases the note after
-`piano-note-duration' seconds."
-  (let* ((key (key-description (vector last-command-event)))
-         (midi (cdr (assoc key piano-keys))))
-    (unless midi
-      (user-error "No piano note bound to %s" key))
-    (let ((note (+ midi piano-transpose)))
-      (piano--note-off note)
-      (piano--note-on note)
-      (let ((timer (gethash note piano--timers)))
-        (when timer
-          (cancel-timer timer)))
-      (puthash note
-               (run-at-time piano-note-duration nil #'piano--note-off note)
-               piano--timers))))
-
 (defun piano-play-key ()
-  "Handle a piano key press from the Emacs side.
-
-With the native key reader active this is a no-op, because the reader
-reports the real key-down and key-up events; otherwise the note plays
-with a timer-based release."
-  (interactive)
-  (unless (process-live-p piano--keys-process)
-    (piano--emacs-key-note)))
+  "Shadow a mapped key so it does not self-insert in piano buffers.
+The key reader reports the real key-down and key-up events."
+  (interactive))
 
 (defvar piano-mode-map nil
   "Keymap for `piano-mode'.
@@ -238,9 +194,11 @@ name also the sibling build inside this repository."
                                           piano--load-dir))))))
 
 (defun piano--helper-active-p ()
-  "Return non-nil when key-reader events should be processed."
-  (or (not piano-require-piano-buffer)
-      (null piano--piano-buffer)
+  "Return non-nil when key-reader events should be processed.
+
+Events are only processed while the piano buffer has focus, so other
+buffers keep normal typing."
+  (or (null piano--piano-buffer)
       (eq (window-buffer (selected-window)) piano--piano-buffer)))
 
 (defun piano--apply-key-event (action key)
@@ -293,7 +251,10 @@ kept in a process property until they are finished."
   "Start the native key reader."
   (unless (process-live-p piano--keys-process)
     (let ((program (or (piano--find-keys-program)
-                       (user-error "Program %S not found" piano-keys-program))))
+                       (user-error
+                        "Program %S not found; build it with \
+\"cargo build --release\" in piano_core/"
+                        piano-keys-program))))
       (with-current-buffer (get-buffer-create " *piano-keys-errors*")
         (erase-buffer))
       (setq piano--keys-process
@@ -377,12 +338,7 @@ a bad SoundFont or an unusable audio driver."
 (defun piano--start ()
   "Start the synthesizer and the key reader."
   (piano--start-synth)
-  (pcase piano-input
-    ('keys-helper (piano--start-helper))
-    ('emacs-keys nil)
-    ('auto (if (piano--find-keys-program)
-               (piano--start-helper)
-             (message "piano-keys not found; using Emacs keys (timer-based release)"))))
+  (piano--start-helper)
   (add-hook 'window-buffer-change-functions #'piano--window-changed))
 
 (defun piano--stop ()
@@ -394,8 +350,6 @@ a bad SoundFont or an unusable audio driver."
     (setq piano--keys-process nil
           piano--focused-p nil
           piano--piano-buffer nil)
-    (maphash (lambda (_midi timer) (cancel-timer timer)) piano--timers)
-    (clrhash piano--timers)
     (piano--all-notes-off)
     (when (process-live-p piano--synth-process)
       (ignore-errors
@@ -464,16 +418,14 @@ a bad SoundFont or an unusable audio driver."
 
 (defun piano--doctor-devices ()
   "Return a line about /dev/input visibility."
-  (if (not (memq system-type '(gnu/linux gnu/kfreebsd)))
-      ""
-    (let ((devices (ignore-errors
-                     (directory-files "/dev/input" t "^event[0-9]+$"))))
-      (cond ((null devices)
-             "  devices:   no /dev/input/event* devices visible\n")
-            ((seq-some #'file-readable-p devices)
-             "  devices:   keyboard event devices are readable\n")
-            (t
-             "  devices:   event devices exist but are NOT readable (join the input group or add a udev uaccess rule)\n")))))
+  (let ((devices (ignore-errors
+                   (directory-files "/dev/input" t "^event[0-9]+$"))))
+    (cond ((null devices)
+           "  devices:   no /dev/input/event* devices visible\n")
+          ((seq-some #'file-readable-p devices)
+           "  devices:   keyboard event devices are readable\n")
+          (t
+           "  devices:   event devices exist but are NOT readable (join the input group or add a udev uaccess rule)\n"))))
 
 (defun piano--doctor-tail (buffer-name)
   "Return the last stderr of BUFFER-NAME, or an empty string."
@@ -491,10 +443,7 @@ a bad SoundFont or an unusable audio driver."
          (synth-live (and piano--synth-process
                           (process-live-p piano--synth-process)))
          (keys-live (and piano--keys-process
-                         (process-live-p piano--keys-process)))
-         (input (if keys-live "native helper (running)"
-                  (if keys "native helper (available)"
-                    "Emacs key events (timer release)"))))
+                         (process-live-p piano--keys-process))))
     (concat
      "piano-mode doctor\n\n"
      "Synthesizer\n"
@@ -507,7 +456,7 @@ a bad SoundFont or an unusable audio driver."
      "\nKey reader\n"
      (format "  program:   %s\n"
              (or keys (format "%S is not installed" piano-keys-program)))
-     (format "  input:     %s\n" input)
+     (format "  process:   %s\n" (if keys-live "running" "not running"))
      (piano--doctor-devices)
      (piano--doctor-tail " *piano-keys-errors*")
      "\nTry it\n"
