@@ -198,10 +198,8 @@ a checkout just works."
                         (expand-file-name "piano_core/target/debug/piano-keys"
                                           piano--load-dir))))))
 
-(defvar piano--device nil
-  "Device path chosen for this Emacs session, nil for auto-detection.")
-(defvar piano--device-chosen nil
-  "Non-nil once the device choice has been made this session.")
+(defvar piano--chosen-device 'unset
+  "Device path chosen for this session: `unset', nil (auto) or a path.")
 
 (defun piano--parse-devices (text)
   "Return an alist of (LABEL . PATH) for the keyboard lines in TEXT."
@@ -220,8 +218,13 @@ a checkout just works."
 (defun piano--list-devices (program)
   "Return an alist of (LABEL . PATH) for the keyboards PROGRAM reports."
   (with-temp-buffer
+    ;; stdout and stderr both land here, so a failure's stderr becomes
+    ;; part of the error message below.
     (unless (zerop (call-process program nil t nil "--list-devices"))
-      (user-error "Listing keyboards with %S failed" program))
+      (user-error
+       "Listing keyboards failed (%s); check read access to /dev/input \
+(udev uaccess or the input group)"
+       (string-trim (buffer-string))))
     (piano--parse-devices (buffer-string))))
 
 (defun piano--select-device (program)
@@ -231,21 +234,24 @@ Uses `piano-device' when set; otherwise asks PROGRAM for its
 keyboards and lets the user pick one, asking only once per session."
   (cond ((and (stringp piano-device) (not (string-empty-p piano-device)))
          piano-device)
-        (piano--device-chosen piano--device)
+        ((not (eq piano--chosen-device 'unset))
+         piano--chosen-device)
         (t
          (let ((devices (piano--list-devices program)))
            (cond ((null devices)
-                  (user-error "No keyboard device found by %S" program))
+                  (user-error
+                   "No readable keyboard found under /dev/input; add yourself \
+to the input group (or grant udev uaccess access) and try again"))
                  ((null (cdr devices))
-                  (setq piano--device (cdar devices)))
+                  (setq piano--chosen-device (cdar devices)))
                  (t
                   (let* ((choices (cons "Auto-detect (first match)"
                                         (mapcar #'car devices)))
                          (choice (completing-read "Keyboard device: " choices nil t)))
-                    (unless (string-prefix-p "Auto-detect" choice)
-                      (setq piano--device (cdr (assoc choice devices)))))))
-           (setq piano--device-chosen t)
-           piano--device))))
+                    (setq piano--chosen-device
+                          (unless (string-prefix-p "Auto-detect" choice)
+                            (cdr (assoc choice devices)))))))
+           piano--chosen-device))))
 
 (defun piano-select-device ()
   "Choose the keyboard device for `piano-mode' and save the choice."
@@ -253,7 +259,7 @@ keyboards and lets the user pick one, asking only once per session."
   (let ((program (or (piano--find-keys-program)
                      (user-error "Key reader piano-keys not found (%S)"
                                  piano-keys-program))))
-    (setq piano--device-chosen nil)
+    (setq piano--chosen-device 'unset)
     (let ((device (piano--select-device program)))
       (customize-save-variable 'piano-device device)
       (message "Piano keyboard device: %s" (or device "auto-detect")))))
@@ -302,6 +308,7 @@ kept in a process property until they are finished."
     (when (eq process piano--keys-process)
       (setq piano--keys-process nil))
     (unless piano--stopping
+      (piano--all-notes-off)
       (let ((tail (string-trim (with-current-buffer " *piano-keys-errors*"
                                  (buffer-string)))))
         (message "The piano-keys reader exited: %s"
@@ -401,7 +408,9 @@ set `piano-soundfont'"))))
   "Start the synthesizer and the key reader."
   (piano--start-synth)
   (piano--start-helper)
-  (add-hook 'window-buffer-change-functions #'piano--window-changed))
+  (add-hook 'window-buffer-change-functions #'piano--window-changed)
+  ;; Record the focus state now: the hook above only fires on changes.
+  (setq piano--focused-p (piano--helper-active-p)))
 
 (defun piano--stop ()
   "Stop the key reader, release all notes, stop the synthesizer."
@@ -437,7 +446,9 @@ set `piano-soundfont'"))))
       (condition-case error
           (piano--start)
         (error
+         ;; A failed start must not leak the synthesizer process.
          (setq piano-mode nil)
+         (piano--stop)
          (signal (car error) (cdr error))))
     (piano--stop)))
 
@@ -501,7 +512,7 @@ set `piano-soundfont'"))))
   "Build the diagnostic report string."
   (let* ((synth (executable-find piano-synth-program))
          (soundfont (piano--soundfont))
-         (keys (executable-find piano-keys-program))
+         (keys (piano--find-keys-program))
          (synth-live (and piano--synth-process
                           (process-live-p piano--synth-process)))
          (keys-live (and piano--keys-process
@@ -512,7 +523,9 @@ set `piano-soundfont'"))))
      (format "  program:   %s\n"
              (or synth (format "%S is not installed" piano-synth-program)))
      (format "  soundfont: %s\n" (or soundfont "NOT FOUND"))
-     (format "  audio:     %s\n" (or piano-audio-driver "FluidSynth default"))
+     (format "  audio:     %s%s\n"
+             (or piano-audio-driver "FluidSynth default")
+             (if piano-audio-driver "" " (try \"pipewire\" if you hear nothing)"))
      (format "  process:   %s\n" (if synth-live "running" "not running"))
      (piano--doctor-tail " *piano-fluidsynth-errors*")
      "\nKey reader\n"

@@ -140,8 +140,7 @@ Return PREDICATE's final value."
 (ert-deftest piano-test-select-device-single ()
   "A single candidate device is picked without prompting."
   (let ((piano-device nil)
-        (piano--device nil)
-        (piano--device-chosen nil))
+        (piano--chosen-device 'unset))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("Only (/dev/input/event3)" . "/dev/input/event3")))))
@@ -151,8 +150,7 @@ Return PREDICATE's final value."
 (ert-deftest piano-test-select-device-prompt ()
   "With several candidates the completion choice wins."
   (let ((piano-device nil)
-        (piano--device nil)
-        (piano--device-chosen nil))
+        (piano--chosen-device 'unset))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("Keyboard B (/dev/input/event5)" . "/dev/input/event5")
@@ -178,8 +176,7 @@ Return PREDICATE's final value."
 (ert-deftest piano-test-select-device-auto ()
   "Choosing auto-detect yields nil, so no --device is passed."
   (let ((piano-device nil)
-        (piano--device nil)
-        (piano--device-chosen nil))
+        (piano--chosen-device 'unset))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("A (/dev/input/event3)" . "/dev/input/event3")
@@ -188,6 +185,6 @@ Return PREDICATE's final value."
                (lambda (_prompt _choices &rest _args)
                  "Auto-detect (first match)")))
       (should (equal (piano--select-device "piano-keys") nil))
-      (should piano--device-chosen))))
+      (should (eq piano--chosen-device nil)))))
 
 ;;; piano-mode-test.el ends here
