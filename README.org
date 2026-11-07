@@ -36,9 +36,10 @@ install -Dm755 emacs-piano-mode/piano_core/target/release/piano-keys ~/.local/bi
 #+end_src
 
 When the package is loaded straight from this repository (with
-=eval-buffer= or =load-file=), =piano_core/target/release/piano-keys=
-and =piano_core/src/TimGM6mb.sf2= are found automatically, so no PATH
-or SoundFont setup is needed for a quick try.
+=eval-buffer= or =load-file=), the bundled
+=piano_core/src/TimGM6mb.sf2= SoundFont is found automatically.
+=piano-keys= itself must be reachable through =exec-path= (e.g.
+=~/.local/bin=, as installed above) or =piano-keys-program=.
 
 * Usage
 
@@ -121,6 +122,11 @@ text; leaving it releases all notes.
 - *No sound at all*: run =M-x piano-doctor= — it reports the
   synthesizer, SoundFont, key reader and device access in one buffer —
   and =M-x piano-test-note= to test the synthesizer alone.
+- *piano-keys not found*: build it (=cargo build --release= in
+  =piano_core/=) and put =target/release/piano-keys= on =PATH=, or
+  point =piano-keys-program= at the built binary.
+- *FluidSynth not found*: install FluidSynth (e.g. =sudo apt install
+  fluidsynth=).
 - *=piano-keys exited (cannot list /dev/input ...)=*: the Wayland
   backend could not read keyboard devices.  See the Wayland note above.
 - *FluidSynth exited at startup*: the SoundFont or the audio driver is
