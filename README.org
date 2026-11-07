@@ -91,9 +91,11 @@ logged-in user; otherwise add yourself to the =input= group).
 
 *Choosing a keyboard with several plugged in:* on the first =M-x
 piano-play= the key reader lists the keyboards it can see and Emacs
-asks which one to use (a single keyboard is picked automatically; the
-choice is remembered for the session).  =piano-select-device= re-asks
-and saves the answer to =piano-device=, so it survives restarts.
+asks which one to use (a single keyboard is picked automatically).
+The answer is saved to =piano-device=, so the prompt appears only
+once; =M-x piano-select-device= re-asks and saves a new answer.  The
+=*piano*= buffer header and =M-x piano-doctor= show which device is
+active.
 
 *Wayland note:* Wayland deliberately hides global keyboard state from
 applications; =piano-keys= bypasses it by reading =/dev/input=
