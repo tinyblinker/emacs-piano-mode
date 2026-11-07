@@ -61,6 +61,16 @@ Key names are single letters, digits or punctuation accepted by the
 For example (\"--backend\" \"x11\") forces the X11 backend on Linux."
   :type '(repeat string))
 
+(defcustom piano-device nil
+  "Evdev device path used by the key reader, or nil.
+
+Nil selects the device on the first start: the key reader lists the
+keyboards it can see and you pick one with completion; a single
+keyboard is picked automatically.  A string pins the reader to that
+device, e.g. \"/dev/input/by-id/usb-Keychron_K8_Pro-event-kbd\".
+`piano-select-device' re-runs the interactive choice and saves it."
+  :type '(choice (const :tag "Ask when needed" nil) string))
+
 (defcustom piano-poll-ms 4
   "Keyboard polling interval in milliseconds."
   :type 'integer)
@@ -173,6 +183,66 @@ self-insert while the helper listens globally.")
   "Return the --keys argument derived from `piano-keys'."
   (mapconcat (lambda (binding) (upcase (car binding))) piano-keys ","))
 
+(defvar piano--device nil
+  "Device path chosen for this Emacs session, nil for auto-detection.")
+(defvar piano--device-chosen nil
+  "Non-nil once the device choice has been made this session.")
+
+(defun piano--parse-devices (text)
+  "Return an alist of (LABEL . PATH) for the keyboard lines in TEXT."
+  (let ((devices nil))
+    (dolist (line (split-string text "\n"))
+      (let ((fields (split-string line "\t")))
+        (when (equal (nth 2 fields) "yes")
+          (let* ((path (nth 0 fields))
+                 (name (nth 1 fields))
+                 (label (if (string-empty-p (or name ""))
+                            path
+                          (format "%s (%s)" name path))))
+            (push (cons label path) devices)))))
+    (nreverse devices)))
+
+(defun piano--list-devices (program)
+  "Return an alist of (LABEL . PATH) for the keyboards PROGRAM reports."
+  (with-temp-buffer
+    (unless (zerop (call-process program nil t nil "--list-devices"))
+      (user-error "Listing keyboards with %S failed" program))
+    (piano--parse-devices (buffer-string))))
+
+(defun piano--select-device (program)
+  "Return the evdev device path to use, or nil for auto-detection.
+
+Uses `piano-device' when set; otherwise asks PROGRAM for its
+keyboards and lets the user pick one, asking only once per session."
+  (cond ((and (stringp piano-device) (not (string-empty-p piano-device)))
+         piano-device)
+        (piano--device-chosen piano--device)
+        (t
+         (let ((devices (piano--list-devices program)))
+           (cond ((null devices)
+                  (user-error "No keyboard device found by %S" program))
+                 ((null (cdr devices))
+                  (setq piano--device (cdar devices)))
+                 (t
+                  (let* ((choices (cons "Auto-detect (first match)"
+                                        (mapcar #'car devices)))
+                         (choice (completing-read "Keyboard device: " choices nil t)))
+                    (unless (string-prefix-p "Auto-detect" choice)
+                      (setq piano--device (cdr (assoc choice devices)))))))
+           (setq piano--device-chosen t)
+           piano--device))))
+
+(defun piano-select-device ()
+  "Choose the keyboard device for `piano-mode' and save the choice."
+  (interactive)
+  (let ((program (or (executable-find piano-keys-program)
+                     (user-error "Key reader piano-keys not found (%S)"
+                                 piano-keys-program))))
+    (setq piano--device-chosen nil)
+    (let ((device (piano--select-device program)))
+      (customize-save-variable 'piano-device device)
+      (message "Piano keyboard device: %s" (or device "auto-detect")))))
+
 (defun piano--helper-active-p ()
   "Return non-nil when key-reader events should be processed.
 
@@ -225,12 +295,13 @@ kept in a process property until they are finished."
 (defun piano--start-helper ()
   "Start the native key reader."
   (unless (process-live-p piano--keys-process)
-    (let ((program
-           (or (executable-find piano-keys-program)
-               (user-error
-                "Key reader piano-keys not found (%S); run \"cargo build --release\" \
+    (let* ((program
+            (or (executable-find piano-keys-program)
+                (user-error
+                 "Key reader piano-keys not found (%S); run \"cargo build --release\" \
 in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-program'"
-                piano-keys-program))))
+                 piano-keys-program)))
+           (device (piano--select-device program)))
       (with-current-buffer (get-buffer-create " *piano-keys-errors*")
         (erase-buffer))
       (setq piano--keys-process
@@ -239,6 +310,7 @@ in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-pro
              :command (append (list program
                                     "--keys" (piano--helper-keys-argument)
                                     "--poll-ms" (number-to-string piano-poll-ms))
+                              (when device (list "--device" device))
                               piano-keys-extra-args)
              :connection-type 'pipe
              :coding 'utf-8-unix

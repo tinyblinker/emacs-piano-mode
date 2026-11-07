@@ -107,4 +107,56 @@ Return PREDICATE's final value."
   (should (equal (piano--helper-keys-argument)
                  "A,W,S,E,D,F,T,G,Y,H,U,J,K,O,L,P,;")))
 
+(ert-deftest piano-test-parse-devices ()
+  "Keyboard lines in --list-devices output become (LABEL . PATH) pairs."
+  (should
+   (equal
+    (piano--parse-devices
+     (concat "/dev/input/event1\tFake Keyboard\tyes\n"
+             "/dev/input/event2\tFake Mouse\tno\n"
+             "/dev/input/event3\t\tno\n"))
+    '(("Fake Keyboard (/dev/input/event1)" . "/dev/input/event1")))))
+
+(ert-deftest piano-test-select-device-single ()
+  "A single candidate device is picked without prompting."
+  (let ((piano-device nil)
+        (piano--device nil)
+        (piano--device-chosen nil))
+    (cl-letf (((symbol-function 'piano--list-devices)
+               (lambda (_program)
+                 '(("Only (/dev/input/event3)" . "/dev/input/event3")))))
+      (should (equal (piano--select-device "piano-keys")
+                     "/dev/input/event3")))))
+
+(ert-deftest piano-test-select-device-prompt ()
+  "With several candidates the completion choice wins."
+  (let ((piano-device nil)
+        (piano--device nil)
+        (piano--device-chosen nil))
+    (cl-letf (((symbol-function 'piano--list-devices)
+               (lambda (_program)
+                 '(("Keyboard B (/dev/input/event5)" . "/dev/input/event5")
+                   ("Keyboard A (/dev/input/event3)" . "/dev/input/event3"))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt choices &rest _args)
+                 (should (member "Auto-detect (first match)" choices))
+                 "Keyboard A (/dev/input/event3)")))
+      (should (equal (piano--select-device "piano-keys")
+                     "/dev/input/event3")))))
+
+(ert-deftest piano-test-select-device-auto ()
+  "Choosing auto-detect yields nil, so no --device is passed."
+  (let ((piano-device nil)
+        (piano--device nil)
+        (piano--device-chosen nil))
+    (cl-letf (((symbol-function 'piano--list-devices)
+               (lambda (_program)
+                 '(("A (/dev/input/event3)" . "/dev/input/event3")
+                   ("B (/dev/input/event5)" . "/dev/input/event5"))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt _choices &rest _args)
+                 "Auto-detect (first match)")))
+      (should (equal (piano--select-device "piano-keys") nil))
+      (should piano--device-chosen))))
+
 ;;; piano-mode-test.el ends here

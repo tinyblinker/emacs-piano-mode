@@ -1,6 +1,18 @@
 #!/bin/sh
-# Test stand-in for the real piano-keys binary: emits one scripted
-# down/up pair, then idles until killed.
+# Test stand-in for the real piano-keys binary.
+# - `--list-devices` prints keyboard candidates; PIANO_TEST_DEVICES
+#   (if set) overrides the default list verbatim.
+# - otherwise it emits one scripted down/up pair, then idles until
+#   killed.  Other arguments (like --device) are ignored.
+if [ "$1" = "--list-devices" ]; then
+  if [ -n "${PIANO_TEST_DEVICES:-}" ]; then
+    printf '%s\n' "$PIANO_TEST_DEVICES"
+  else
+    printf '/dev/input/event1\tFake Keyboard One\tyes\n'
+    printf '/dev/input/event2\tFake Mouse\tno\n'
+  fi
+  exit 0
+fi
 sleep 0.2
 echo "down A"
 sleep 0.2
