@@ -24,19 +24,13 @@
 (require 'seq)
 (require 'subr-x)
 
-(defun piano--guess-load-dir ()
-  "Guess the directory piano-mode.el was loaded from."
+(defvar piano--load-dir
   (let ((file (or (and (boundp 'load-file-name) load-file-name)
                   (buffer-file-name))))
     (when file
-      (file-name-directory file))))
-
-(defvar piano--load-dir (piano--guess-load-dir)
+      (file-name-directory file)))
   "Directory the package was loaded from, or nil.
-
-Used to find a sibling piano-keys binary or the bundled SoundFont,
-so the package works when it is loaded straight from the repository
-with `eval-buffer' or `load-file'.")
+Used to find the SoundFont bundled next to the loaded file.")
 
 (defgroup piano nil
   "Play a piano from your computer keyboard."
@@ -179,20 +173,6 @@ self-insert while the helper listens globally.")
   "Return the --keys argument derived from `piano-keys'."
   (mapconcat (lambda (binding) (upcase (car binding))) piano-keys ","))
 
-(defun piano--find-keys-program ()
-  "Return the piano-keys executable, or nil.
-
-Checks `piano-keys-program' on the search path, and for the default
-name also the sibling build inside this repository."
-  (or (executable-find piano-keys-program)
-      (when (and (string= piano-keys-program "piano-keys")
-                 piano--load-dir)
-        (seq-find #'file-executable-p
-                  (list (expand-file-name "piano_core/target/release/piano-keys"
-                                          piano--load-dir)
-                        (expand-file-name "piano_core/target/debug/piano-keys"
-                                          piano--load-dir))))))
-
 (defun piano--helper-active-p ()
   "Return non-nil when key-reader events should be processed.
 
@@ -237,24 +217,20 @@ kept in a process property until they are finished."
     (when (eq process piano--keys-process)
       (setq piano--keys-process nil))
     (unless piano--stopping
-      (let ((error-output (with-current-buffer " *piano-keys-errors*"
-                            (buffer-string))))
-        (message "piano-keys exited%s%s"
-                 (if (string-empty-p error-output)
-                     ""
-                   (format " (%s)" (string-trim error-output)))
-                 (if (string-empty-p (string-trim event))
-                     ""
-                   (format ": %s" (string-trim event))))))))
+      (let ((tail (string-trim (with-current-buffer " *piano-keys-errors*"
+                                 (buffer-string)))))
+        (message "The piano-keys reader exited: %s"
+                 (if (string-empty-p tail) (string-trim event) tail))))))
 
 (defun piano--start-helper ()
   "Start the native key reader."
   (unless (process-live-p piano--keys-process)
-    (let ((program (or (piano--find-keys-program)
-                       (user-error
-                        "Program %S not found; build it with \
-\"cargo build --release\" in piano_core/"
-                        piano-keys-program))))
+    (let ((program
+           (or (executable-find piano-keys-program)
+               (user-error
+                "Key reader piano-keys not found (%S); run \"cargo build --release\" \
+in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-program'"
+                piano-keys-program))))
       (with-current-buffer (get-buffer-create " *piano-keys-errors*")
         (erase-buffer))
       (setq piano--keys-process
@@ -291,12 +267,9 @@ kept in a process property until they are finished."
     (when (eq process piano--synth-process)
       (setq piano--synth-process nil))
     (unless (or piano--stopping piano--synth-starting)
-      (message "FluidSynth exited: %s%s"
-               (string-trim event)
+      (message "FluidSynth exited: %s"
                (let ((tail (piano--synth-error-tail)))
-                 (if (string-empty-p tail)
-                     ""
-                   (format " — %s" tail)))))))
+                 (if (string-empty-p tail) (string-trim event) tail))))))
 
 (defun piano--start-synth ()
   "Start FluidSynth unless it is already running.
@@ -306,9 +279,11 @@ a bad SoundFont or an unusable audio driver."
   (unless (and piano--synth-process
                (process-live-p piano--synth-process))
     (let ((program (or (executable-find piano-synth-program)
-                       (user-error "Program %S not found" piano-synth-program)))
+                       (user-error "FluidSynth not found (%S); install it first"
+                                   piano-synth-program)))
           (soundfont (or (piano--soundfont)
-                         (user-error "No SoundFont; customize `piano-soundfont'"))))
+                         (user-error "SoundFont not found; install one or \
+set `piano-soundfont'"))))
       (with-current-buffer (get-buffer-create " *piano-fluidsynth-errors*")
         (erase-buffer))
       (let ((piano--synth-starting t)
@@ -439,7 +414,7 @@ a bad SoundFont or an unusable audio driver."
   "Build the diagnostic report string."
   (let* ((synth (executable-find piano-synth-program))
          (soundfont (piano--soundfont))
-         (keys (piano--find-keys-program))
+         (keys (executable-find piano-keys-program))
          (synth-live (and piano--synth-process
                           (process-live-p piano--synth-process)))
          (keys-live (and piano--keys-process
