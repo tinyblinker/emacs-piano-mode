@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test stand-in for FluidSynth: appends every stdin line to the log
+# file named by PIANO_SYNTH_LOG.
+cat >> "${PIANO_SYNTH_LOG:?PIANO_SYNTH_LOG is not set}"

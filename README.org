@@ -1,21 +1,173 @@
-* Hi There!
-** NEXT 先实现:1234567映射到一个八度的七个音阶(按下1234567能正确发声)
-*** DONE evdev接收键盘输入信息(println!()成功打印)
-CLOSED: [2026-10-30 Fri 20:29]
-*** DONE (用rustysynth crates)调用rustysynth(+输出到cpal)库发出基本声音
-CLOSED: [2026-11-01 Sun 17:06]
-*** NEXT 利用用println!()信息维护一个键盘按下的状态的结构体,分别映射"1234567"到适当音阶
-**** DONE 解析键盘输入:正确输出1234567的状态(println!输出)
-CLOSED: [2026-11-01 Sun 18:16]
-**** DONE 解析键盘输入:正确维护1234567的状态(Keyboard结构体中的哈希表)
-CLOSED: [2026-11-01 Sun 18:40]
-**** DONE 当输入"1"时,播放一个音符
-CLOSED: [2026-11-02 Mon 19:40]
-**** NEXT 用FluidSynth / fluidsynth项目二进制直接发声
-**** TODO 不要线程间共享哈希表啊(损耗延迟太高)
-* TODO
-** TODO 用rust接入优化按键扫描(一个rust单文件程序处理当前所有键的情况(docker部署,单独给予input组权限
-evdev + rust方案),可以多个键,以纯文本形式传入elisp处理)和play sound(用现成工具或单文件rust)的部分
-打算emacs完全作为"镜像"来显示一个rust单文件程序的stdout(kdb_helper监听键盘事件(evdev)+先用rodio正弦波or如下)
-?考虑用FluidSynth纯命令行代替rust内置钢琴音色合成器
-单独用一个input组权限的docker容器来跑这个程序呢
+#+title: piano-mode
+#+options: toc:3
+
+Turn your computer keyboard into a piano inside Emacs, with real
+key-down / key-up tracking.
+
+* Features
+- *True key-up*: notes keep sounding exactly as long as you hold the
+  key — no fixed note length, no auto-release.
+- *Low dependency*: a single Elisp file (zero third-party Emacs
+  packages) plus one small Rust binary with zero crate dependencies.
+- *Linux*: works under both X11 and Wayland sessions.
+- *No root, no =input= group*: the X11 key map and the kernel evdev
+  ABI are both readable by the logged-in user on normal desktop
+  setups.
+- Chords and polyphony through one persistent FluidSynth process.
+
+* Requirements
+- GNU Emacs >= 28
+- Rust toolchain (only needed to build ~piano-keys~)
+- FluidSynth and a SoundFont, e.g. on Debian/Ubuntu:
+  #+begin_src sh
+  sudo apt install fluidsynth fluid-soundfont-gm
+  #+end_src
+
+* Install
+#+begin_src sh
+git clone https://github.com/tinyblinker/emacs-piano-mode
+cargo build --release --manifest-path emacs-piano-mode/piano_core/Cargo.toml
+install -Dm755 emacs-piano-mode/piano_core/target/release/piano-keys ~/.local/bin/piano-keys
+#+end_src
+
+#+begin_src elisp
+(add-to-list 'load-path "/path/to/emacs-piano-mode")
+(require 'piano-mode)
+#+end_src
+
+When the package is loaded straight from this repository (with
+=eval-buffer= or =load-file=), the bundled
+=piano_core/src/TimGM6mb.sf2= SoundFont is found automatically.
+=piano-keys= itself must be reachable through =exec-path= (e.g.
+=~/.local/bin=, as installed above) or =piano-keys-program=.
+
+* Usage
+
+=M-x piano-play= opens the =*piano*= buffer and starts everything.
+Run =M-x piano-mode= (or kill the buffer) to stop the instrument.
+
+#+begin_src text
+  W E   T Y U   O P
+A S D F G H J K L ;
+#+end_src
+
+| key | note | key | note | key | note |
+|-----+------+-----+------+-----+------|
+| a   | C4   | g   | G4   | k   | C5   |
+| w   | C#4  | y   | G#4  | o   | C#5  |
+| s   | D4   | h   | A4   | l   | D5   |
+| e   | D#4  | u   | A#4  | p   | D#5  |
+| d   | E4   | j   | B4   | ;   | E5   |
+| f   | F4   |     |      |     |      |
+| t   | F#4  |     |      |     |      |
+
+The mapped keys are read *globally* by =piano-keys=.  While the
+=*piano*= buffer has focus they do not insert text, and focus tracking
+releases all notes as soon as you leave it — other buffers keep normal
+typing.
+
+* How it works
+
+#+begin_src text
+physical keyboard
+      │  OS key state, polled (default 4 ms)
+      ▼
+piano-keys  (Rust, zero crates, no root/input group)
+      │  "down A" / "up A" lines on stdout
+      ▼
+piano-mode.el  (key → MIDI map, note state, focus gate)
+      │  "noteon 0 60 100" / "noteoff 0 60" lines on stdin
+      ▼
+FluidSynth  (one persistent process)
+#+end_src
+
+* Linux backends
+
+| session | backend          | permissions                                              |
+|---------+------------------+----------------------------------------------------------|
+| X11     | =XQueryKeymap=     | none                                                     |
+| Wayland | kernel evdev ABI | seat access (udev =uaccess=; =input= group only as fallback) |
+
+=piano-keys= picks the backend automatically (evdev under a Wayland
+session, X11 otherwise); force one with =piano-keys-extra-args=, e.g.
+=("--backend" "x11")=.
+
+*Choosing a keyboard with several plugged in:* on the first =M-x
+piano-play= the key reader lists the keyboards it can see and Emacs
+asks which one to use (a single keyboard is picked automatically; the
+choice is remembered for the session).  =piano-select-device= re-asks
+and saves the answer to =piano-device=, so it survives restarts.
+
+*Wayland note:* Wayland deliberately hides global keyboard state from
+applications.  =piano-keys= therefore reads =/dev/input= directly,
+which the logged-in user can normally read on systemd distributions
+(the =uaccess= udev tag).  If your setup denies access, either add
+yourself to the =input= group, or force =--backend x11= — which works
+while an X11 window (e.g. an X11 Emacs build under XWayland) has
+focus.
+
+* Configuration
+
+| variable              | default      | meaning                                   |
+|-----------------------+--------------+-------------------------------------------|
+| =piano-keys=            | alist        | key names → MIDI notes                    |
+| =piano-transpose=       | 0            | semitone shift                            |
+| =piano-velocity=        | 100          | MIDI velocity                             |
+| =piano-keys-program=    | "piano-keys" | key reader executable                     |
+| =piano-keys-extra-args= | nil          | extra reader arguments                    |
+| =piano-device=          | nil          | evdev device path; nil asks interactively |
+| =piano-poll-ms=         | 4            | key polling interval                      |
+| =piano-synth-program=   | "fluidsynth" | synthesizer executable                    |
+| =piano-soundfont=       | auto         | SoundFont path                            |
+| =piano-audio-driver=    | nil          | FluidSynth audio driver                   |
+| =piano-gain=            | 0.5          | FluidSynth master gain                    |
+
+While the =*piano*= buffer has focus, the mapped keys do not insert
+text; leaving it releases all notes.
+
+* Troubleshooting
+- *No sound at all*: run =M-x piano-doctor= — it reports the
+  synthesizer, SoundFont, key reader and device access in one buffer —
+  and =M-x piano-test-note= to test the synthesizer alone.
+- *piano-keys not found*: build it (=cargo build --release= in
+  =piano_core/=) and put =target/release/piano-keys= on =PATH=, or
+  point =piano-keys-program= at the built binary.
+- *The wrong keyboard plays*: run =M-x piano-select-device= to pick
+  the right one, or run =piano-keys --list-devices= to see the
+  candidates (stable paths live under =/dev/input/by-id/=).
+- *FluidSynth not found*: install FluidSynth (e.g. =sudo apt install
+  fluidsynth=).
+- *=piano-keys exited (cannot list /dev/input ...)=*: the Wayland
+  backend could not read keyboard devices.  See the Wayland note above.
+- *FluidSynth exited at startup*: the SoundFont or the audio driver is
+  unusable; the error shows FluidSynth's stderr.  Try
+  =piano-audio-driver= ("pipewire", "pulseaudio", "alsa") or another
+  SoundFont.
+- *No sound*: run =fluidsynth -a alsa -n /path/to/font.sf2= manually
+  and check the audio driver; set =piano-audio-driver=.
+- *Latency*: lower =piano-poll-ms= (default 4 ms) and check
+  FluidSynth's audio buffer settings.
+- *Stuck note*: =M-x piano-mode= releases everything.
+
+* Development
+#+begin_src sh
+  # Rust
+  cargo fmt --check
+  cargo clippy --locked --all-targets -- -D warnings
+  cargo test --locked
+  # Elisp
+  emacs --batch -Q -f batch-byte-compile piano-mode.el
+  emacs --batch -Q -L . -l test/piano-mode-test.el -f ert-run-tests-batch-and-exit
+#+end_src
+
+* Roadmap
+- [X] zero-dependency Linux key reader (=piano-keys=)
+- [X] real key-up note on/off via FluidSynth
+- [ ] prebuilt =piano-keys= binaries attached to releases
+- [ ] on-screen keyboard with pressed-key highlighting
+- [ ] octave shift and multi-octave layouts
+- [ ] MIDI recording/export
+
+* License
+
+License to be decided; any bundled SoundFont carries its own license.
