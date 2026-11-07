@@ -51,16 +51,18 @@ Return PREDICATE's final value."
   "A down/up pair from piano-keys becomes noteon/noteoff."
   (piano-test-environment
     (with-temp-buffer
-      (piano-mode 1)
-      (unwind-protect
-          (progn
-            (should (piano-test-wait-for
-                     (lambda ()
-                       (let ((log (piano-test-slurp piano-test-log)))
-                         (and (string-match-p "noteon 0 60 100" log)
-                              (string-match-p "noteoff 0 60" log))))))
-            (should (= 0 (hash-table-count piano--active))))
-        (piano-mode -1)))))
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((piano--piano-buffer (current-buffer)))
+        (piano-mode 1)
+        (unwind-protect
+            (progn
+              (should (piano-test-wait-for
+                       (lambda ()
+                         (let ((log (piano-test-slurp piano-test-log)))
+                           (and (string-match-p "noteon 0 60 100" log)
+                                (string-match-p "noteoff 0 60" log))))))
+              (should (= 0 (hash-table-count piano--active))))
+          (piano-mode -1))))))
 
 (ert-deftest piano-test-stop-kills-processes ()
   "Disabling the mode stops both helper processes."
@@ -81,7 +83,9 @@ Return PREDICATE's final value."
     (clrhash piano--active)
     (cl-letf (((symbol-function 'piano--synth-send)
                (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) calls))))
+                 (push (apply #'format format-string args) calls)))
+              ((symbol-function 'piano--helper-active-p)
+               (lambda () t)))
       (piano--handle-keys-line "down A")
       (piano--handle-keys-line "up A")
       (piano--handle-keys-line "down Q")
@@ -97,7 +101,9 @@ Return PREDICATE's final value."
     (clrhash piano--active)
     (cl-letf (((symbol-function 'piano--synth-send)
                (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) calls))))
+                 (push (apply #'format format-string args) calls)))
+              ((symbol-function 'piano--helper-active-p)
+               (lambda () t)))
       (piano--handle-keys-line "down A"))
     (should (member "noteon 0 62 100\n" calls))
     (should (member 62 (hash-table-keys piano--active)))))
@@ -143,6 +149,17 @@ Return PREDICATE's final value."
                  "Keyboard A (/dev/input/event3)")))
       (should (equal (piano--select-device "piano-keys")
                      "/dev/input/event3")))))
+
+(ert-deftest piano-test-helper-active-gate ()
+  "Key events are gated on the piano buffer existing and being focused."
+  (with-temp-buffer
+    (set-window-buffer (selected-window) (current-buffer))
+    (let ((piano--piano-buffer nil))
+      (should-not (piano--helper-active-p))       ; no piano buffer yet
+      (setq piano--piano-buffer (current-buffer))
+      (should (piano--helper-active-p))           ; piano buffer focused
+      (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+      (should-not (piano--helper-active-p)))))    ; focus moved away
 
 (ert-deftest piano-test-select-device-auto ()
   "Choosing auto-detect yields nil, so no --device is passed."

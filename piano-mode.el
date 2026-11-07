@@ -244,12 +244,12 @@ keyboards and lets the user pick one, asking only once per session."
       (message "Piano keyboard device: %s" (or device "auto-detect")))))
 
 (defun piano--helper-active-p ()
-  "Return non-nil when key-reader events should be processed.
+  "Return non-nil when the piano buffer exists and has focus.
 
-Events are only processed while the piano buffer has focus, so other
-buffers keep normal typing."
-  (or (null piano--piano-buffer)
-      (eq (window-buffer (selected-window)) piano--piano-buffer)))
+Events are only processed while the dedicated piano buffer is shown
+in the selected window, so other buffers keep normal typing."
+  (and piano--piano-buffer
+       (eq (window-buffer (selected-window)) piano--piano-buffer)))
 
 (defun piano--apply-key-event (action key)
   "Turn an ACTION (\"down\"/\"up\") event for KEY into note-on/note-off."
@@ -321,7 +321,7 @@ in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-pro
              :sentinel #'piano--keys-sentinel)))))
 
 (defun piano--window-changed (window)
-  "Release all notes when WINDOW's buffer stops being the piano buffer."
+  "Release all notes when WINDOW stops showing the piano buffer."
   (let ((focused (and piano--piano-buffer
                       (eq (window-buffer window) piano--piano-buffer))))
     (when (and piano--focused-p (not focused))
