@@ -187,6 +187,9 @@ fn c_string(bytes: &[u8]) -> String {
 pub fn open_device(path: &Path, names: &[char]) -> Result<Evdev, String> {
     let file =
         File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    if !is_keyboard(&file) {
+        return Err(format!("{} is not a keyboard device", path.display()));
+    }
     let fd = file.as_raw_fd();
     let codes = names
         .iter()
