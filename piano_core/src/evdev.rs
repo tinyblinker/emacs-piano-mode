@@ -16,6 +16,7 @@ use std::ffi::{c_int, c_ulong};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
 
@@ -25,6 +26,7 @@ const SYN_DROPPED: u16 = 0x03;
 
 /// ioctl requests (Linux `input.h`).
 const EVIOCGKEY: c_ulong = 0x8060_4504; // _IOC(_IOC_READ, 'E', 0x04, 96)
+const EVIOCGNAME: c_ulong = 0x8100_4506; // _IOC(_IOC_READ, 'E', 0x06, 256)
 const EVIOCGBIT_EV: c_ulong = 0x801f_4520; // _IOC(_IOC_READ, 'E', 0x20, 31)
 const EVIOCGBIT_KEY: c_ulong = 0x8060_4521; // _IOC(_IOC_READ, 'E', 0x21, 96)
 
@@ -69,21 +71,19 @@ pub struct Evdev {
     state: Vec<bool>,
 }
 
+/// One event device under /dev/input, as reported by `list_devices`.
+pub struct Device {
+    pub path: PathBuf,
+    pub name: String,
+    pub keyboard: bool,
+}
+
 impl Evdev {
     /// Find the first keyboard under /dev/input and start reading it.
-    pub fn open(names: &[char]) -> Result<Self, String> {
-        let mut devices: Vec<_> = fs::read_dir("/dev/input")
-            .map_err(|error| format!("cannot list /dev/input: {error}"))?
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| {
-                path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("event"))
-            })
-            .collect();
-        devices.sort();
-        for path in devices {
-            if is_keyboard(&path) {
-                return open_device(&path, names);
+    pub fn autodetect(names: &[char]) -> Result<Self, String> {
+        for device in list_devices()? {
+            if device.keyboard {
+                return open_device(&device.path, names);
             }
         }
         Err("no readable keyboard device found under /dev/input; \
@@ -130,8 +130,64 @@ impl Drop for Evdev {
     }
 }
 
+/// Enumerate the event devices under /dev/input with their names and
+/// whether they look like a keyboard, ordered by event number.
+pub fn list_devices() -> Result<Vec<Device>, String> {
+    let mut devices = Vec::new();
+    for entry in fs::read_dir("/dev/input")
+        .map_err(|error| format!("cannot list /dev/input: {error}"))?
+        .filter_map(|entry| entry.ok())
+    {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("event"))
+        {
+            continue;
+        }
+        let (name, keyboard) = match File::open(&path) {
+            Ok(file) => (device_name(file.as_raw_fd()), is_keyboard(&file)),
+            Err(_) => (String::new(), false), // not readable: list it, but not as a keyboard
+        };
+        devices.push(Device {
+            path,
+            name,
+            keyboard,
+        });
+    }
+    devices.sort_by_key(|device| event_number(&device.path));
+    Ok(devices)
+}
+
+/// The event number of an `/dev/input/eventN` path, for stable sorting.
+fn event_number(path: &Path) -> u64 {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("event"))
+        .and_then(|suffix| suffix.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Read the device name with the EVIOCGNAME ioctl.
+fn device_name(fd: RawFd) -> String {
+    let mut name = [0_u8; 256];
+    if unsafe { ioctl(fd, EVIOCGNAME, name.as_mut_ptr()) } < 0 {
+        return String::new();
+    }
+    c_string(&name)
+}
+
+/// The bytes up to the first NUL, as a lossy string.
+fn c_string(bytes: &[u8]) -> String {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
 /// Open one event device and start reading it.
-fn open_device(path: &std::path::Path, names: &[char]) -> Result<Evdev, String> {
+pub fn open_device(path: &Path, names: &[char]) -> Result<Evdev, String> {
     let file =
         File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
     let fd = file.as_raw_fd();
@@ -193,11 +249,8 @@ fn drain_events(pending: &mut Vec<u8>, event_size: usize) -> Vec<Event> {
     events
 }
 
-/// Whether `path` looks like a keyboard device.
-fn is_keyboard(path: &std::path::Path) -> bool {
-    let Ok(file) = File::open(path) else {
-        return false;
-    };
+/// Whether an opened event device looks like a keyboard.
+fn is_keyboard(file: &File) -> bool {
     let fd = file.as_raw_fd();
     let mut ev_mask = [0_u8; 32];
     if unsafe { ioctl(fd, EVIOCGBIT_EV, ev_mask.as_mut_ptr()) } < 0 {
@@ -266,6 +319,22 @@ mod tests {
         mask[30 / 8] |= 1 << (30 % 8); // KEY_A
         assert_ne!(mask[30 / 8] & (1 << (30 % 8)), 0);
         assert_eq!(mask[1] & (1 << 3), 0);
+    }
+
+    #[test]
+    fn event_numbers_sort_numerically() {
+        let number = |path: &str| event_number(Path::new(path));
+        assert_eq!(number("/dev/input/event10"), 10);
+        assert_eq!(number("/dev/input/event2"), 2);
+        assert!(number("/dev/input/event2") < number("/dev/input/event10"));
+        assert_eq!(number("/dev/input/mouse0"), 0);
+    }
+
+    #[test]
+    fn c_strings_end_at_the_first_nul() {
+        assert_eq!(c_string(b"Keychron K8 Pro\0ignored"), "Keychron K8 Pro");
+        assert_eq!(c_string(b""), "");
+        assert_eq!(c_string(b"no nul"), "no nul");
     }
 
     #[test]

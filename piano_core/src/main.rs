@@ -24,6 +24,7 @@ mod keys;
 mod x11;
 
 use std::io::{self, Write};
+use std::path::Path;
 use std::time::Duration;
 
 const DEFAULT_POLL_MS: u64 = 4;
@@ -32,12 +33,15 @@ const USAGE: &str = "\
 piano-keys — report keyboard press/release events on stdout (Linux)
 
 USAGE:
-  piano-keys [--keys K1,K2,...] [--poll-ms N] [--backend NAME] [--help]
+  piano-keys [--keys K1,K2,...] [--poll-ms N] [--backend NAME]
+             [--device PATH] [--list-devices] [--help]
 
-  --keys      comma-separated key names to watch
-              (default: every letter and digit)
-  --poll-ms   polling interval in milliseconds, 1-100 (default: 4)
-  --backend   keyboard backend: x11, evdev or auto (default: auto)
+  --keys          comma-separated key names to watch
+                  (default: every letter and digit)
+  --poll-ms       polling interval in milliseconds, 1-100 (default: 4)
+  --backend       keyboard backend: x11, evdev or auto (default: auto)
+  --device        evdev device to use instead of auto-detection
+  --list-devices  list the event devices and exit
 
 OUTPUT, one line per state change:
   down A
@@ -73,18 +77,19 @@ enum Keyboard {
 
 impl Keyboard {
     /// Open the backend selected by `choice` for the given key `names`.
-    fn open(names: &[char], choice: Backend) -> Result<Self, String> {
+    /// `device` pins the evdev backend to one device file.
+    fn open(names: &[char], choice: Backend, device: Option<&Path>) -> Result<Self, String> {
         match choice {
             Backend::X11 => Ok(Self::X11(x11::X11::open(names)?)),
-            Backend::Evdev => Ok(Self::Evdev(evdev::Evdev::open(names)?)),
+            Backend::Evdev => Ok(Self::Evdev(open_evdev(names, device)?)),
             Backend::Auto => {
                 if wayland_session() {
                     // Wayland: prefer evdev, see the module docs above.
-                    Ok(Self::Evdev(evdev::Evdev::open(names)?))
+                    Ok(Self::Evdev(open_evdev(names, device)?))
                 } else {
                     match x11::X11::open(names) {
                         Ok(x11) => Ok(Self::X11(x11)),
-                        Err(x11_error) => match evdev::Evdev::open(names) {
+                        Err(x11_error) => match open_evdev(names, device) {
                             Ok(evdev) => Ok(Self::Evdev(evdev)),
                             Err(evdev_error) => Err(format!(
                                 "x11 backend failed: {x11_error}; \
@@ -106,6 +111,14 @@ evdev backend failed: {evdev_error}"
     }
 }
 
+/// Open the evdev backend, pinned to `device` when given.
+fn open_evdev(names: &[char], device: Option<&Path>) -> Result<evdev::Evdev, String> {
+    match device {
+        Some(path) => evdev::open_device(path, names),
+        None => evdev::Evdev::autodetect(names),
+    }
+}
+
 /// Whether this looks like a native Wayland session.
 fn wayland_session() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -116,12 +129,16 @@ struct Args {
     keys: Vec<char>,
     poll_ms: u64,
     backend: Backend,
+    device: Option<String>,
+    list_devices: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut keys = None;
     let mut poll_ms = DEFAULT_POLL_MS;
     let mut backend = Backend::Auto;
+    let mut device = None;
+    let mut list_devices = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -145,6 +162,10 @@ fn parse_args() -> Result<Args, String> {
                 let value = arguments.next().ok_or("--backend requires a value")?;
                 backend = Backend::parse(&value)?;
             }
+            "--device" => {
+                device = Some(arguments.next().ok_or("--device requires a value")?);
+            }
+            "--list-devices" => list_devices = true,
             other => return Err(format!("unexpected argument {other:?}")),
         }
     }
@@ -156,6 +177,8 @@ fn parse_args() -> Result<Args, String> {
         keys,
         poll_ms,
         backend,
+        device,
+        list_devices,
     })
 }
 
@@ -191,7 +214,30 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let mut keyboard = match Keyboard::open(&args.keys, args.backend) {
+    if args.list_devices {
+        match evdev::list_devices() {
+            Ok(devices) => {
+                for device in devices {
+                    println!(
+                        "{}\t{}\t{}",
+                        device.path.display(),
+                        device.name,
+                        if device.keyboard { "yes" } else { "no" }
+                    );
+                }
+                return;
+            }
+            Err(message) => {
+                eprintln!("piano-keys: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    let mut keyboard = match Keyboard::open(
+        &args.keys,
+        args.backend,
+        args.device.as_deref().map(Path::new),
+    ) {
         Ok(keyboard) => keyboard,
         Err(message) => {
             eprintln!("piano-keys: {message}");
