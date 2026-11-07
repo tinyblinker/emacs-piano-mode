@@ -47,7 +47,7 @@ pub struct X11 {
 
 impl X11 {
     /// Open the display and resolve keycodes for `names`.
-    pub fn new(names: &[char]) -> Result<Self, String> {
+    pub fn open(names: &[char]) -> Result<Self, String> {
         let library = c"libX11.so.6";
         let handle = unsafe { dlopen(library.as_ptr(), RTLD_LAZY) };
         if handle.is_null() {

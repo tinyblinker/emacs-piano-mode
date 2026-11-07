@@ -1,19 +1,21 @@
-//! Linux evdev backend: read the kernel evdev ABI from
-//! `/dev/input/event*` directly.
+//! evdev backend: read the kernel input ABI from `/dev/input/event*`
+//! directly.
 //!
-//! This is the reliable backend under a native Wayland session,
-//! where XWayland only knows key state while an X11 client is
-//! focused.  systemd-logind grants the active seat user read access
-//! to keyboard devices (udev `uaccess`), so the `input` group is
-//! normally not required.
+//! This is the reliable backend under a native Wayland session, where
+//! XWayland only knows key state while an X11 client is focused.
+//! systemd-logind grants the active seat user read access to keyboard
+//! devices (udev `uaccess`), so the `input` group is normally not
+//! required.
 
-use crate::keys::linux_evdev_keycode;
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("the evdev backend assumes a 64-bit Linux ABI");
+
+use crate::keys::evdev_keycode;
 
 use std::ffi::{c_int, c_ulong};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
 
@@ -31,8 +33,7 @@ unsafe extern "C" {
     fn close(fd: c_int) -> c_int;
 }
 
-/// `struct input_event` — 24 bytes on 64-bit kernels.
-#[cfg(target_pointer_width = "64")]
+/// `struct input_event` on a 64-bit kernel (24 bytes).
 #[repr(C)]
 struct InputEvent {
     time: [u64; 2],
@@ -41,17 +42,6 @@ struct InputEvent {
     value: i32,
 }
 
-/// `struct input_event` — 16 bytes on 32-bit kernels.
-#[cfg(target_pointer_width = "32")]
-#[repr(C)]
-struct InputEvent {
-    time: [u32; 2],
-    event_type: u16,
-    code: u16,
-    value: i32,
-}
-
-#[cfg(target_pointer_width = "64")]
 fn input_event_from(bytes: &[u8]) -> InputEvent {
     InputEvent {
         time: [
@@ -61,19 +51,6 @@ fn input_event_from(bytes: &[u8]) -> InputEvent {
         event_type: u16::from_ne_bytes(bytes[16..18].try_into().expect("enough bytes")),
         code: u16::from_ne_bytes(bytes[18..20].try_into().expect("enough bytes")),
         value: i32::from_ne_bytes(bytes[20..24].try_into().expect("enough bytes")),
-    }
-}
-
-#[cfg(target_pointer_width = "32")]
-fn input_event_from(bytes: &[u8]) -> InputEvent {
-    InputEvent {
-        time: [
-            u32::from_ne_bytes(bytes[0..4].try_into().expect("enough bytes")),
-            u32::from_ne_bytes(bytes[4..8].try_into().expect("enough bytes")),
-        ],
-        event_type: u16::from_ne_bytes(bytes[8..10].try_into().expect("enough bytes")),
-        code: u16::from_ne_bytes(bytes[10..12].try_into().expect("enough bytes")),
-        value: i32::from_ne_bytes(bytes[12..16].try_into().expect("enough bytes")),
     }
 }
 
@@ -93,8 +70,8 @@ pub struct Evdev {
 }
 
 impl Evdev {
-    /// Find and open a keyboard device.
-    pub fn autodetect(names: &[char]) -> Result<Self, String> {
+    /// Find the first keyboard under /dev/input and start reading it.
+    pub fn open(names: &[char]) -> Result<Self, String> {
         let mut devices: Vec<_> = fs::read_dir("/dev/input")
             .map_err(|error| format!("cannot list /dev/input: {error}"))?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -106,32 +83,13 @@ impl Evdev {
         devices.sort();
         for path in devices {
             if is_keyboard(&path) {
-                return Self::open(&path, names);
+                return open_device(&path, names);
             }
         }
         Err("no readable keyboard device found under /dev/input; \
 grant your user access (udev uaccess or the input group) or try --backend x11 \
 (which works while an X11 window is focused)"
             .into())
-    }
-
-    /// Open one event device and start reading it.
-    pub fn open(path: &Path, names: &[char]) -> Result<Self, String> {
-        let file =
-            File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
-        let fd = file.as_raw_fd();
-        let codes = names
-            .iter()
-            .map(|&name| {
-                linux_evdev_keycode(name).expect("validated key name without an evdev keycode")
-            })
-            .collect();
-        Ok(Self {
-            fd,
-            receiver: spawn_reader(file),
-            codes,
-            state: vec![false; names.len()],
-        })
     }
 
     /// Drain queued events and return the current pressed state.
@@ -170,6 +128,23 @@ impl Drop for Evdev {
         // thread return, so the thread exits.
         unsafe { close(self.fd) };
     }
+}
+
+/// Open one event device and start reading it.
+fn open_device(path: &std::path::Path, names: &[char]) -> Result<Evdev, String> {
+    let file =
+        File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let fd = file.as_raw_fd();
+    let codes = names
+        .iter()
+        .map(|&name| evdev_keycode(name).expect("validated key name without an evdev keycode"))
+        .collect();
+    Ok(Evdev {
+        fd,
+        receiver: spawn_reader(file),
+        codes,
+        state: vec![false; names.len()],
+    })
 }
 
 /// Spawn a thread that reads events from `file` forever.
@@ -219,7 +194,7 @@ fn drain_events(pending: &mut Vec<u8>, event_size: usize) -> Vec<Event> {
 }
 
 /// Whether `path` looks like a keyboard device.
-fn is_keyboard(path: &Path) -> bool {
+fn is_keyboard(path: &std::path::Path) -> bool {
     let Ok(file) = File::open(path) else {
         return false;
     };

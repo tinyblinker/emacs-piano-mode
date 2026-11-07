@@ -1,4 +1,4 @@
-//! piano-keys — cross-platform keyboard press/release reporter.
+//! piano-keys — Linux keyboard press/release reporter.
 //!
 //! Watches a set of keys and prints one line per state change:
 //!
@@ -8,15 +8,20 @@
 //! ```
 //!
 //! Key state is polled, so key releases are detected with
-//! poll-interval latency.  No external crates are used, and no root
-//! or `input` group membership is required:
+//! poll-interval latency.  Two zero-dependency backends are used:
 //!
-//! - Linux, X11 sessions: `XQueryKeymap` (libX11 loaded via dlopen).
-//! - Linux, Wayland sessions: the kernel evdev ABI via `/dev/input`.
-//! - Windows: `GetAsyncKeyState` from user32.dll.
-//! - macOS: `CGEventSourceKeyState` from the CoreGraphics framework.
+//! - X11: `XQueryKeymap` (libX11 loaded with dlopen) — no privileges.
+//! - evdev: the kernel input ABI from `/dev/input` — used under
+//!   Wayland, where XWayland only knows key state while an X11
+//!   client is focused.  Needs seat access (udev `uaccess`), which
+//!   normally requires no `input` group membership.
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("piano-keys supports Linux only");
+
+mod evdev;
 mod keys;
+mod x11;
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -24,7 +29,7 @@ use std::time::Duration;
 const DEFAULT_POLL_MS: u64 = 4;
 
 const USAGE: &str = "\
-piano-keys — report keyboard press/release events on stdout
+piano-keys — report keyboard press/release events on stdout (Linux)
 
 USAGE:
   piano-keys [--keys K1,K2,...] [--poll-ms N] [--backend NAME] [--help]
@@ -32,23 +37,91 @@ USAGE:
   --keys      comma-separated key names to watch
               (default: every letter and digit)
   --poll-ms   polling interval in milliseconds, 1-100 (default: 4)
-  --backend   keyboard backend (Linux: x11, evdev or auto; default: auto)
+  --backend   keyboard backend: x11, evdev or auto (default: auto)
 
 OUTPUT, one line per state change:
   down A
   up A
 ";
 
+/// The selected keyboard backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    Auto,
+    X11,
+    Evdev,
+}
+
+impl Backend {
+    fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "auto" => Ok(Self::Auto),
+            "x11" => Ok(Self::X11),
+            "evdev" => Ok(Self::Evdev),
+            other => Err(format!(
+                "unknown backend {other:?} (expected x11, evdev or auto)"
+            )),
+        }
+    }
+}
+
+/// An open keyboard reader.
+enum Keyboard {
+    X11(x11::X11),
+    Evdev(evdev::Evdev),
+}
+
+impl Keyboard {
+    /// Open the backend selected by `choice` for the given key `names`.
+    fn open(names: &[char], choice: Backend) -> Result<Self, String> {
+        match choice {
+            Backend::X11 => Ok(Self::X11(x11::X11::open(names)?)),
+            Backend::Evdev => Ok(Self::Evdev(evdev::Evdev::open(names)?)),
+            Backend::Auto => {
+                if wayland_session() {
+                    // Wayland: prefer evdev, see the module docs above.
+                    Ok(Self::Evdev(evdev::Evdev::open(names)?))
+                } else {
+                    match x11::X11::open(names) {
+                        Ok(x11) => Ok(Self::X11(x11)),
+                        Err(x11_error) => match evdev::Evdev::open(names) {
+                            Ok(evdev) => Ok(Self::Evdev(evdev)),
+                            Err(evdev_error) => Err(format!(
+                                "x11 backend failed: {x11_error}; \
+evdev backend failed: {evdev_error}"
+                            )),
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    /// Poll the keyboard; returns one pressed flag per watched key.
+    fn poll(&mut self) -> Result<Vec<bool>, String> {
+        match self {
+            Self::X11(backend) => backend.poll(),
+            Self::Evdev(backend) => backend.poll(),
+        }
+    }
+}
+
+/// Whether this looks like a native Wayland session.
+fn wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|value| value == "wayland")
+}
+
 struct Args {
     keys: Vec<char>,
     poll_ms: u64,
-    backend: keys::Backend,
+    backend: Backend,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut keys = None;
     let mut poll_ms = DEFAULT_POLL_MS;
-    let mut backend = keys::Backend::Auto;
+    let mut backend = Backend::Auto;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -70,7 +143,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--backend" => {
                 let value = arguments.next().ok_or("--backend requires a value")?;
-                backend = keys::Backend::parse(&value)?;
+                backend = Backend::parse(&value)?;
             }
             other => return Err(format!("unexpected argument {other:?}")),
         }
@@ -118,7 +191,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let mut keyboard = match keys::Keyboard::new(&args.keys, args.backend) {
+    let mut keyboard = match Keyboard::open(&args.keys, args.backend) {
         Ok(keyboard) => keyboard,
         Err(message) => {
             eprintln!("piano-keys: {message}");

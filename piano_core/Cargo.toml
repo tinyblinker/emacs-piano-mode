@@ -2,7 +2,7 @@
 name = "piano_core"
 version = "0.2.0"
 edition = "2024"
-description = "Cross-platform keyboard reader for piano-mode (zero dependencies)"
+description = "Linux keyboard reader for piano-mode (zero dependencies)"
 rust-version = "1.85"
 
 [[bin]]
