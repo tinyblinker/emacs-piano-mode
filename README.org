@@ -83,10 +83,10 @@ FluidSynth  (one persistent process)
 
 * Linux backends
 
-| session  | backend          | permissions                                          |
-|----------+------------------+------------------------------------------------------|
-| X11      | =XQueryKeymap=   | none                                                 |
-| Wayland  | kernel evdev ABI | seat access (udev =uaccess=; =input= group only as fallback) |
+| session | backend          | permissions                                              |
+|---------+------------------+----------------------------------------------------------|
+| X11     | =XQueryKeymap=     | none                                                     |
+| Wayland | kernel evdev ABI | seat access (udev =uaccess=; =input= group only as fallback) |
 
 =piano-keys= picks the backend automatically (evdev under a Wayland
 session, X11 otherwise); force one with =piano-keys-extra-args=, e.g.
@@ -108,19 +108,19 @@ focus.
 
 * Configuration
 
-| variable                   | default       | meaning                              |
-|----------------------------+---------------+--------------------------------------|
-| =piano-keys=               | alist         | key names → MIDI notes               |
-| =piano-transpose=          | 0             | semitone shift                       |
-| =piano-velocity=           | 100           | MIDI velocity                        |
-| =piano-keys-program=       | "piano-keys"  | key reader executable                |
-| =piano-keys-extra-args=    | nil           | extra reader arguments               |
-| =piano-device=             | nil           | evdev device path; nil asks interactively |
-| =piano-poll-ms=            | 4             | key polling interval                 |
-| =piano-synth-program=      | "fluidsynth"  | synthesizer executable               |
-| =piano-soundfont=          | auto          | SoundFont path                       |
-| =piano-audio-driver=       | nil           | FluidSynth audio driver              |
-| =piano-gain=               | 0.5           | FluidSynth master gain               |
+| variable              | default      | meaning                                   |
+|-----------------------+--------------+-------------------------------------------|
+| =piano-keys=            | alist        | key names → MIDI notes                    |
+| =piano-transpose=       | 0            | semitone shift                            |
+| =piano-velocity=        | 100          | MIDI velocity                             |
+| =piano-keys-program=    | "piano-keys" | key reader executable                     |
+| =piano-keys-extra-args= | nil          | extra reader arguments                    |
+| =piano-device=          | nil          | evdev device path; nil asks interactively |
+| =piano-poll-ms=         | 4            | key polling interval                      |
+| =piano-synth-program=   | "fluidsynth" | synthesizer executable                    |
+| =piano-soundfont=       | auto         | SoundFont path                            |
+| =piano-audio-driver=    | nil          | FluidSynth audio driver                   |
+| =piano-gain=            | 0.5          | FluidSynth master gain                    |
 
 While the =*piano*= buffer has focus, the mapped keys do not insert
 text; leaving it releases all notes.
@@ -151,13 +151,13 @@ text; leaving it releases all notes.
 
 * Development
 #+begin_src sh
-# Rust
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-# Elisp
-emacs --batch -Q -f batch-byte-compile piano-mode.el
-emacs --batch -Q -L . -l test/piano-mode-test.el -f ert-run-tests-batch-and-exit
+  # Rust
+  cargo fmt --check
+  cargo clippy --locked --all-targets -- -D warnings
+  cargo test --locked
+  # Elisp
+  emacs --batch -Q -f batch-byte-compile piano-mode.el
+  emacs --batch -Q -L . -l test/piano-mode-test.el -f ert-run-tests-batch-and-exit
 #+end_src
 
 * Roadmap
