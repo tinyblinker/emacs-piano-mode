@@ -24,11 +24,32 @@ key-down / key-up tracking.
   #+end_src
 
 * Install
+
+** With use-package and :vc (built-in package manager, no manual clone)
+
+The Elisp package installs straight from this repository with Emacs'
+built-in package manager.  The native ~piano-keys~ reader is not
+shipped as an Elisp file, so build it once (see below).
+
+#+begin_src elisp
+;; Emacs >= 30 (use-package with :vc):
+(use-package piano-mode
+  :vc (:url "https://github.com/tinyblinker/emacs-piano-mode")
+  :custom (piano-audio-driver "pipewire"))
+
+;; Emacs >= 29.1 (plain package-vc):
+(package-vc-install "https://github.com/tinyblinker/emacs-piano-mode")
+#+end_src
+
+The native key reader is built once, separately:
+
 #+begin_src sh
 git clone https://github.com/tinyblinker/emacs-piano-mode
 cargo build --release --manifest-path emacs-piano-mode/piano_core/Cargo.toml
 install -Dm755 emacs-piano-mode/piano_core/target/release/piano-keys ~/.local/bin/piano-keys
 #+end_src
+
+** Manually
 
 #+begin_src elisp
 (add-to-list 'load-path "/path/to/emacs-piano-mode")
@@ -40,6 +61,18 @@ When the package is loaded straight from this repository (with
 =piano_core/src/TimGM6mb.sf2= SoundFont is found automatically.
 =piano-keys= itself must be reachable through =exec-path= (e.g.
 =~/.local/bin=, as installed above) or =piano-keys-program=.
+
+** MELPA
+
+The package follows MELPA conventions (package-lint and checkdoc are
+clean).  A MELPA recipe would be:
+
+#+begin_src elisp
+(piano-mode
+ :fetcher github
+ :repo "tinyblinker/emacs-piano-mode"
+ :files ("piano-mode.el"))
+#+end_src
 
 * Usage
 
@@ -168,4 +201,5 @@ text; leaving it releases all notes.
 
 * License
 
-License to be decided; any bundled SoundFont carries its own license.
+GPL-3.0-or-later (see =LICENSE=).  Any bundled SoundFont carries its
+own license.

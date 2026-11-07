@@ -1,6 +1,7 @@
-;;; piano-mode.el --- Play piano in Emacs with real key-up  -*- lexical-binding: t; -*-
+;;; piano-mode.el --- Play piano with real key-up  -*- lexical-binding: t; -*-
 
 ;; Author: shyweeds
+;; Maintainer: shyweeds
 ;; Version: 0.3.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: games, multimedia
@@ -46,6 +47,7 @@ Used to find the SoundFont bundled next to the loaded file.")
 
 Key names are single letters, digits or punctuation accepted by the
 `piano-keys' program."
+  :group 'piano
   :type '(alist :key-type string :value-type integer)
   :set (lambda (symbol value)
          (set-default symbol value)
@@ -54,12 +56,14 @@ Key names are single letters, digits or punctuation accepted by the
 
 (defcustom piano-keys-program "piano-keys"
   "Name (or path) of the native key reader program."
+  :group 'piano
   :type 'string)
 
 (defcustom piano-keys-extra-args nil
   "Extra arguments passed to `piano-keys-program'.
 For example (\"--device\" \"/dev/input/event3\") pins one keyboard
 device."
+  :group 'piano
   :type '(repeat string))
 
 (defcustom piano-device nil
@@ -70,36 +74,44 @@ keyboards it can see and you pick one with completion; a single
 keyboard is picked automatically.  A string pins the reader to that
 device, e.g. \"/dev/input/by-id/usb-Keychron_K8_Pro-event-kbd\".
 `piano-select-device' re-runs the interactive choice and saves it."
+  :group 'piano
   :type '(choice (const :tag "Ask when needed" nil) string))
 
 (defcustom piano-poll-ms 4
   "Keyboard polling interval in milliseconds."
+  :group 'piano
   :type 'integer)
 
 (defcustom piano-transpose 0
   "Semitones added to every note."
+  :group 'piano
   :type 'integer)
 
 (defcustom piano-velocity 100
   "MIDI velocity (1-127) sent with every note-on."
+  :group 'piano
   :type 'integer)
 
 (defcustom piano-synth-program "fluidsynth"
   "Name (or path) of the FluidSynth executable."
+  :group 'piano
   :type 'string)
 
 (defcustom piano-soundfont nil
   "SoundFont file for FluidSynth.
 If nil, try `PIANO_SOUNDFONT' and common system locations."
+  :group 'piano
   :type '(choice (const :tag "Auto-detect" nil) file))
 
 (defcustom piano-audio-driver nil
   "FluidSynth audio driver, e.g. \"alsa\" or \"pipewire\".
 Nil lets FluidSynth pick its default."
+  :group 'piano
   :type '(choice (const :tag "FluidSynth default" nil) string))
 
 (defcustom piano-gain 0.5
   "FluidSynth master gain."
+  :group 'piano
   :type 'number)
 
 ;; Note state is a global resource (sound comes from one global
@@ -250,6 +262,7 @@ to the input group (or grant udev uaccess access) and try again"))
                    (message "Piano keyboard device saved: %s" path)
                    path))))))))
 
+;;;###autoload
 (defun piano-select-device ()
   "Choose the keyboard device for `piano-mode' and save the choice."
   (interactive)
@@ -559,6 +572,7 @@ set `piano-soundfont'"))))
      "  M-x piano-play, then press the mapped keys in the *piano* buffer.\n"
      "  M-x piano-test-note plays a note through the synthesizer only.\n")))
 
+;;;###autoload
 (defun piano-doctor ()
   "Show a diagnostic report for the piano pipeline."
   (interactive)
