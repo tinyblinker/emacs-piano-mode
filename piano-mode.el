@@ -12,7 +12,7 @@
 ;; tracking.
 ;;
 ;; The companion `piano-keys' program (Rust, zero dependencies) reads
-;; raw key state on Linux -- X11 or the evdev ABI -- without root or
+;; raw key state from the kernel evdev ABI on Linux without root or
 ;; `input' group membership, and reports "down KEY" / "up KEY" lines
 ;; to Emacs.  Emacs maps them to MIDI notes and drives a persistent
 ;; FluidSynth process.
