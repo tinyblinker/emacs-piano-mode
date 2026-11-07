@@ -58,7 +58,8 @@ Key names are single letters, digits or punctuation accepted by the
 
 (defcustom piano-keys-extra-args nil
   "Extra arguments passed to `piano-keys-program'.
-For example (\"--backend\" \"x11\") forces the X11 backend on Linux."
+For example (\"--device\" \"/dev/input/event3\") pins one keyboard
+device."
   :type '(repeat string))
 
 (defcustom piano-device nil
@@ -183,6 +184,20 @@ self-insert while the helper listens globally.")
   "Return the --keys argument derived from `piano-keys'."
   (mapconcat (lambda (binding) (upcase (car binding))) piano-keys ","))
 
+(defun piano--find-keys-program ()
+  "Return the piano-keys executable, or nil.
+
+Checks `piano-keys-program' on the search path, and also the build
+outputs inside this repository, so loading the package straight from
+a checkout just works."
+  (or (executable-find piano-keys-program)
+      (when piano--load-dir
+        (seq-find #'file-executable-p
+                  (list (expand-file-name "piano_core/target/release/piano-keys"
+                                          piano--load-dir)
+                        (expand-file-name "piano_core/target/debug/piano-keys"
+                                          piano--load-dir))))))
+
 (defvar piano--device nil
   "Device path chosen for this Emacs session, nil for auto-detection.")
 (defvar piano--device-chosen nil
@@ -235,7 +250,7 @@ keyboards and lets the user pick one, asking only once per session."
 (defun piano-select-device ()
   "Choose the keyboard device for `piano-mode' and save the choice."
   (interactive)
-  (let ((program (or (executable-find piano-keys-program)
+  (let ((program (or (piano--find-keys-program)
                      (user-error "Key reader piano-keys not found (%S)"
                                  piano-keys-program))))
     (setq piano--device-chosen nil)
@@ -296,7 +311,7 @@ kept in a process property until they are finished."
   "Start the native key reader."
   (unless (process-live-p piano--keys-process)
     (let* ((program
-            (or (executable-find piano-keys-program)
+            (or (piano--find-keys-program)
                 (user-error
                  "Key reader piano-keys not found (%S); run \"cargo build --release\" \
 in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-program'"

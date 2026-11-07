@@ -113,6 +113,20 @@ Return PREDICATE's final value."
   (should (equal (piano--helper-keys-argument)
                  "A,W,S,E,D,F,T,G,Y,H,U,J,K,O,L,P,;")))
 
+(ert-deftest piano-test-find-keys-program-repo ()
+  "A sibling build inside the repository is found without PATH."
+  (let ((dir (make-temp-file "piano-repo" t)))
+    (unwind-protect
+        (let* ((binary (expand-file-name "piano_core/target/debug/piano-keys" dir))
+               (piano--load-dir dir))
+          (make-directory (expand-file-name "piano_core/target/debug" dir) t)
+          (write-region "" nil binary)
+          (set-file-modes binary #o755)
+          (cl-letf (((symbol-function 'executable-find)
+                     (lambda (_name) nil)))
+            (should (equal (piano--find-keys-program) binary))))
+      (delete-directory dir t))))
+
 (ert-deftest piano-test-parse-devices ()
   "Keyboard lines in --list-devices output become (LABEL . PATH) pairs."
   (should
