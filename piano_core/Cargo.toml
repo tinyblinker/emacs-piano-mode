@@ -1,9 +1,12 @@
 [package]
 name = "piano_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+description = "Cross-platform keyboard reader for piano-mode (zero dependencies)"
+rust-version = "1.85"
+
+[[bin]]
+name = "piano-keys"
+path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.104"
-evdev = "0.13.2"
-nix = { version = "0.31.3", features = ["event"] }
