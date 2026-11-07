@@ -10,9 +10,9 @@ key-down / key-up tracking.
 - *Low dependency*: a single Elisp file (zero third-party Emacs
   packages) plus one small Rust binary with zero crate dependencies.
 - *Linux*: works under both X11 and Wayland sessions.
-- *No root, no =input= group*: the X11 key map and the kernel evdev
-  ABI are both readable by the logged-in user on normal desktop
-  setups.
+- *No root*: only read access to =/dev/input= is needed, which the
+  logged-in user normally has (udev =uaccess=; the =input= group is
+  the fallback).
 - Chords and polyphony through one persistent FluidSynth process.
 
 * Requirements
@@ -81,16 +81,13 @@ piano-mode.el  (key → MIDI map, note state, focus gate)
 FluidSynth  (one persistent process)
 #+end_src
 
-* Linux backends
+* Keyboard input
 
-| session | backend          | permissions                                              |
-|---------+------------------+----------------------------------------------------------|
-| X11     | =XQueryKeymap=     | none                                                     |
-| Wayland | kernel evdev ABI | seat access (udev =uaccess=; =input= group only as fallback) |
-
-=piano-keys= picks the backend automatically (evdev under a Wayland
-session, X11 otherwise); force one with =piano-keys-extra-args=, e.g.
-=("--backend" "x11")=.
+=piano-keys= reads the kernel evdev ABI from =/dev/input= directly —
+the same device files X11 and Wayland compositors use, and independent
+of both.  It works in X11 and Wayland sessions alike, and only needs
+read access to the keyboard device (udev =uaccess= grants it to the
+logged-in user; otherwise add yourself to the =input= group).
 
 *Choosing a keyboard with several plugged in:* on the first =M-x
 piano-play= the key reader lists the keyboards it can see and Emacs
@@ -99,12 +96,10 @@ choice is remembered for the session).  =piano-select-device= re-asks
 and saves the answer to =piano-device=, so it survives restarts.
 
 *Wayland note:* Wayland deliberately hides global keyboard state from
-applications.  =piano-keys= therefore reads =/dev/input= directly,
-which the logged-in user can normally read on systemd distributions
-(the =uaccess= udev tag).  If your setup denies access, either add
-yourself to the =input= group, or force =--backend x11= — which works
-while an X11 window (e.g. an X11 Emacs build under XWayland) has
-focus.
+applications; =piano-keys= bypasses it by reading =/dev/input=
+directly, which the logged-in user can normally read on systemd
+distributions (the =uaccess= udev tag).  If your setup denies access,
+add yourself to the =input= group.
 
 * Configuration
 
@@ -137,8 +132,8 @@ text; leaving it releases all notes.
   candidates (stable paths live under =/dev/input/by-id/=).
 - *FluidSynth not found*: install FluidSynth (e.g. =sudo apt install
   fluidsynth=).
-- *=piano-keys exited (cannot list /dev/input ...)=*: the Wayland
-  backend could not read keyboard devices.  See the Wayland note above.
+- *=piano-keys exited (cannot list /dev/input ...)=*: the keyboard
+  devices could not be read.  See the Wayland note above.
 - *FluidSynth exited at startup*: the SoundFont or the audio driver is
   unusable; the error shows FluidSynth's stderr.  Try
   =piano-audio-driver= ("pipewire", "pulseaudio", "alsa") or another
