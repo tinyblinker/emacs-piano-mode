@@ -198,9 +198,6 @@ a checkout just works."
                         (expand-file-name "piano_core/target/debug/piano-keys"
                                           piano--load-dir))))))
 
-(defvar piano--chosen-device 'unset
-  "Device path chosen for this session: `unset', nil (auto) or a path.")
-
 (defun piano--parse-devices (text)
   "Return an alist of (LABEL . PATH) for the keyboard lines in TEXT."
   (let ((devices nil))
@@ -230,28 +227,28 @@ a checkout just works."
 (defun piano--select-device (program)
   "Return the evdev device path to use, or nil for auto-detection.
 
-Uses `piano-device' when set; otherwise asks PROGRAM for its
-keyboards and lets the user pick one, asking only once per session."
-  (cond ((and (stringp piano-device) (not (string-empty-p piano-device)))
-         piano-device)
-        ((not (eq piano--chosen-device 'unset))
-         piano--chosen-device)
-        (t
-         (let ((devices (piano--list-devices program)))
-           (cond ((null devices)
-                  (user-error
-                   "No readable keyboard found under /dev/input; add yourself \
+Uses `piano-device' when set.  Otherwise asks PROGRAM for its
+keyboards and lets the user pick one; the pick is saved to
+`piano-device', so the prompt appears only once."
+  (if (and (stringp piano-device) (not (string-empty-p piano-device)))
+      piano-device
+    (let ((devices (piano--list-devices program)))
+      (cond ((null devices)
+             (user-error
+              "No readable keyboard found under /dev/input; add yourself \
 to the input group (or grant udev uaccess access) and try again"))
-                 ((null (cdr devices))
-                  (setq piano--chosen-device (cdar devices)))
-                 (t
-                  (let* ((choices (cons "Auto-detect (first match)"
-                                        (mapcar #'car devices)))
-                         (choice (completing-read "Keyboard device: " choices nil t)))
-                    (setq piano--chosen-device
-                          (unless (string-prefix-p "Auto-detect" choice)
-                            (cdr (assoc choice devices)))))))
-           piano--chosen-device))))
+            ((null (cdr devices))
+             ;; Only one keyboard: use it without asking.
+             (cdar devices))
+            (t
+             (let* ((choices (cons "Auto-detect (first match)"
+                                   (mapcar #'car devices)))
+                    (choice (completing-read "Keyboard device: " choices nil t)))
+               (unless (string-prefix-p "Auto-detect" choice)
+                 (let ((path (cdr (assoc choice devices))))
+                   (customize-save-variable 'piano-device path)
+                   (message "Piano keyboard device saved: %s" path)
+                   path))))))))
 
 (defun piano-select-device ()
   "Choose the keyboard device for `piano-mode' and save the choice."
@@ -259,8 +256,10 @@ to the input group (or grant udev uaccess access) and try again"))
   (let ((program (or (piano--find-keys-program)
                      (user-error "Key reader piano-keys not found (%S)"
                                  piano-keys-program))))
-    (setq piano--chosen-device 'unset)
-    (let ((device (piano--select-device program)))
+    ;; Rebinding piano-device forces a fresh prompt instead of reusing
+    ;; the saved value.
+    (let* ((piano-device nil)
+           (device (piano--select-device program)))
       (customize-save-variable 'piano-device device)
       (message "Piano keyboard device: %s" (or device "auto-detect")))))
 
@@ -457,20 +456,28 @@ set `piano-soundfont'"))))
   "Open a dedicated piano buffer and start playing."
   (interactive)
   (let ((buffer (get-buffer-create "*piano*")))
-    (with-current-buffer buffer
-      (unless (derived-mode-p 'special-mode)
-        (special-mode))
-      (piano--show-keys))
     (pop-to-buffer buffer)
     (setq piano--piano-buffer buffer)
     (add-hook 'kill-buffer-hook #'piano--kill-buffer nil t)
-    (piano-mode 1)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'special-mode)
+        (special-mode)))
+    ;; Enable the mode first: the device prompt (if any) must finish
+    ;; before the header below shows which device is active.
+    (piano-mode 1)
+    (with-current-buffer buffer
+      (piano--show-keys))))
 
 (defun piano--show-keys ()
   "Insert the current key layout into the current buffer."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "piano-mode — the keys below are read globally by piano-keys\n"
+            (format "device: %s\n"
+                    (if (and (stringp piano-device)
+                             (not (string-empty-p piano-device)))
+                        piano-device
+                      "auto-detect"))
             "white keys: "
             (mapconcat (lambda (binding) (upcase (car binding)))
                        piano-keys " ")
@@ -490,15 +497,19 @@ set `piano-soundfont'"))))
     (run-at-time 0.8 nil #'piano--note-off note)))
 
 (defun piano--doctor-devices ()
-  "Return a line about /dev/input visibility."
-  (let ((devices (ignore-errors
-                   (directory-files "/dev/input" t "^event[0-9]+$"))))
-    (cond ((null devices)
-           "  devices:   no /dev/input/event* devices visible\n")
-          ((seq-some #'file-readable-p devices)
-           "  devices:   keyboard event devices are readable\n")
-          (t
-           "  devices:   event devices exist but are NOT readable (join the input group or add a udev uaccess rule)\n"))))
+  "Return lines listing the readable keyboards and the active choice."
+  (let* ((program (piano--find-keys-program))
+         (devices (and program (ignore-errors (piano--list-devices program)))))
+    (if (null devices)
+        "  keyboards: none readable; check /dev/input access (udev uaccess or the input group)\n"
+      (concat
+       "  keyboards:\n"
+       (mapconcat (lambda (cell) (format "    - %s\n" (car cell))) devices "")
+       (format "  chosen:    %s\n"
+               (if (and (stringp piano-device)
+                        (not (string-empty-p piano-device)))
+                   piano-device
+                 "auto-detect"))))))
 
 (defun piano--doctor-tail (buffer-name)
   "Return the last stderr of BUFFER-NAME, or an empty string."

@@ -139,8 +139,7 @@ Return PREDICATE's final value."
 
 (ert-deftest piano-test-select-device-single ()
   "A single candidate device is picked without prompting."
-  (let ((piano-device nil)
-        (piano--chosen-device 'unset))
+  (let ((piano-device nil))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("Only (/dev/input/event3)" . "/dev/input/event3")))))
@@ -148,9 +147,9 @@ Return PREDICATE's final value."
                      "/dev/input/event3")))))
 
 (ert-deftest piano-test-select-device-prompt ()
-  "With several candidates the completion choice wins."
+  "With several candidates the completion choice wins and is saved."
   (let ((piano-device nil)
-        (piano--chosen-device 'unset))
+        (saved 'unset))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("Keyboard B (/dev/input/event5)" . "/dev/input/event5")
@@ -158,9 +157,18 @@ Return PREDICATE's final value."
               ((symbol-function 'completing-read)
                (lambda (_prompt choices &rest _args)
                  (should (member "Auto-detect (first match)" choices))
-                 "Keyboard A (/dev/input/event3)")))
+                 "Keyboard A (/dev/input/event3)"))
+              ((symbol-function 'customize-save-variable)
+               (lambda (_symbol value) (setq saved value))))
       (should (equal (piano--select-device "piano-keys")
-                     "/dev/input/event3")))))
+                     "/dev/input/event3"))
+      (should (equal saved "/dev/input/event3")))))
+
+(ert-deftest piano-test-select-device-pinned ()
+  "A saved `piano-device' is used without listing devices."
+  (let ((piano-device "/dev/input/event9"))
+    (should (equal (piano--select-device "piano-keys")
+                   "/dev/input/event9"))))
 
 (ert-deftest piano-test-helper-active-gate ()
   "Key events are gated on the piano buffer existing and being focused."
@@ -174,17 +182,19 @@ Return PREDICATE's final value."
       (should-not (piano--helper-active-p)))))    ; focus moved away
 
 (ert-deftest piano-test-select-device-auto ()
-  "Choosing auto-detect yields nil, so no --device is passed."
+  "Choosing auto-detect yields nil and saves nothing."
   (let ((piano-device nil)
-        (piano--chosen-device 'unset))
+        (saved 'unset))
     (cl-letf (((symbol-function 'piano--list-devices)
                (lambda (_program)
                  '(("A (/dev/input/event3)" . "/dev/input/event3")
                    ("B (/dev/input/event5)" . "/dev/input/event5"))))
               ((symbol-function 'completing-read)
                (lambda (_prompt _choices &rest _args)
-                 "Auto-detect (first match)")))
+                 "Auto-detect (first match)"))
+              ((symbol-function 'customize-save-variable)
+               (lambda (_symbol value) (setq saved value))))
       (should (equal (piano--select-device "piano-keys") nil))
-      (should (eq piano--chosen-device nil)))))
+      (should (eq saved 'unset)))))
 
 ;;; piano-mode-test.el ends here
