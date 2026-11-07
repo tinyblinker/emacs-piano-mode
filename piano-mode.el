@@ -25,6 +25,20 @@
 (require 'seq)
 (require 'subr-x)
 
+(defun piano--guess-load-dir ()
+  "Guess the directory piano-mode.el was loaded from."
+  (let ((file (or (and (boundp 'load-file-name) load-file-name)
+                  (buffer-file-name))))
+    (when file
+      (file-name-directory file))))
+
+(defvar piano--load-dir (piano--guess-load-dir)
+  "Directory the package was loaded from, or nil.
+
+Used to find a sibling piano-keys binary or the bundled SoundFont,
+so the package works when it is loaded straight from the repository
+with `eval-buffer' or `load-file'.")
+
 (defgroup piano nil
   "Play a piano from your computer keyboard."
   :group 'games
@@ -113,6 +127,8 @@ Nil lets FluidSynth pick its default."
   "The FluidSynth process.")
 (defvar piano--stopping nil
   "Non-nil while `piano--stop' is running.")
+(defvar piano--synth-starting nil
+  "Non-nil while `piano--start-synth' waits for FluidSynth to start.")
 (defvar piano--piano-buffer nil
   "The dedicated piano buffer created by `piano-play'.")
 (defvar piano--focused-p nil
@@ -123,9 +139,13 @@ Nil lets FluidSynth pick its default."
   (or piano-soundfont
       (getenv "PIANO_SOUNDFONT")
       (seq-find #'file-readable-p
-                '("/usr/share/sounds/sf2/FluidR3_GM.sf2"
-                  "/usr/share/soundfonts/FluidR3_GM.sf2"
-                  "/usr/share/sounds/sf2/default-GM.sf2"))))
+                (delq nil
+                      (list (when piano--load-dir
+                              (expand-file-name
+                               "piano_core/src/TimGM6mb.sf2" piano--load-dir))
+                            "/usr/share/sounds/sf2/FluidR3_GM.sf2"
+                            "/usr/share/soundfonts/FluidR3_GM.sf2"
+                            "/usr/share/sounds/sf2/default-GM.sf2")))))
 
 (defun piano--synth-send (format-string &rest args)
   "Send the shell command FORMAT-STRING (formatted with ARGS) to FluidSynth."
@@ -203,6 +223,20 @@ self-insert while the helper listens globally.")
   "Return the --keys argument derived from `piano-keys'."
   (mapconcat (lambda (binding) (upcase (car binding))) piano-keys ","))
 
+(defun piano--find-keys-program ()
+  "Return the piano-keys executable, or nil.
+
+Checks `piano-keys-program' on the search path, and for the default
+name also the sibling build inside this repository."
+  (or (executable-find piano-keys-program)
+      (when (and (string= piano-keys-program "piano-keys")
+                 piano--load-dir)
+        (seq-find #'file-executable-p
+                  (list (expand-file-name "piano_core/target/release/piano-keys"
+                                          piano--load-dir)
+                        (expand-file-name "piano_core/target/debug/piano-keys"
+                                          piano--load-dir))))))
+
 (defun piano--helper-active-p ()
   "Return non-nil when key-reader events should be processed."
   (or (not piano-require-piano-buffer)
@@ -258,7 +292,7 @@ kept in a process property until they are finished."
 (defun piano--start-helper ()
   "Start the native key reader."
   (unless (process-live-p piano--keys-process)
-    (let ((program (or (executable-find piano-keys-program)
+    (let ((program (or (piano--find-keys-program)
                        (user-error "Program %S not found" piano-keys-program))))
       (with-current-buffer (get-buffer-create " *piano-keys-errors*")
         (erase-buffer))
@@ -285,34 +319,60 @@ kept in a process property until they are finished."
       (piano--all-notes-off))
     (setq piano--focused-p focused)))
 
+(defun piano--synth-error-tail ()
+  "Return the tail of FluidSynth's stderr, or an empty string."
+  (with-current-buffer (get-buffer-create " *piano-fluidsynth-errors*")
+    (string-trim (buffer-string))))
+
 (defun piano--synth-sentinel (process event)
   "Handle the FluidSynth PROCESS exiting with EVENT."
   (when (memq (process-status process) '(exit signal))
     (when (eq process piano--synth-process)
       (setq piano--synth-process nil))
-    (unless piano--stopping
-      (message "FluidSynth exited: %s" (string-trim event)))))
+    (unless (or piano--stopping piano--synth-starting)
+      (message "FluidSynth exited: %s%s"
+               (string-trim event)
+               (let ((tail (piano--synth-error-tail)))
+                 (if (string-empty-p tail)
+                     ""
+                   (format " — %s" tail)))))))
 
 (defun piano--start-synth ()
-  "Start FluidSynth unless it is already running."
-  (unless (process-live-p piano--synth-process)
+  "Start FluidSynth unless it is already running.
+
+Signal a `user-error' when FluidSynth exits during startup, e.g. on
+a bad SoundFont or an unusable audio driver."
+  (unless (and piano--synth-process
+               (process-live-p piano--synth-process))
     (let ((program (or (executable-find piano-synth-program)
                        (user-error "Program %S not found" piano-synth-program)))
           (soundfont (or (piano--soundfont)
                          (user-error "No SoundFont; customize `piano-soundfont'"))))
-      (setq piano--synth-process
-            (make-process
-             :name "piano-fluidsynth"
-             :command (append (list program
-                                    "-n" "-g" (number-to-string piano-gain))
-                              (when piano-audio-driver
-                                (list "-a" piano-audio-driver))
-                              (list soundfont))
-             :connection-type 'pipe
-             :coding 'utf-8-unix
-             :noquery t
-             :buffer (generate-new-buffer " *piano-fluidsynth*")
-             :sentinel #'piano--synth-sentinel)))))
+      (with-current-buffer (get-buffer-create " *piano-fluidsynth-errors*")
+        (erase-buffer))
+      (let ((piano--synth-starting t)
+            (process
+             (make-process
+              :name "piano-fluidsynth"
+              :command (append (list program
+                                     "-n" "-g" (number-to-string piano-gain))
+                               (when piano-audio-driver
+                                 (list "-a" piano-audio-driver))
+                               (list soundfont))
+              :connection-type 'pipe
+              :coding 'utf-8-unix
+              :noquery t
+              :buffer (generate-new-buffer " *piano-fluidsynth*")
+              :stderr (get-buffer-create " *piano-fluidsynth-errors*")
+              :sentinel #'piano--synth-sentinel)))
+        (setq piano--synth-process process)
+        ;; Give it a moment to start: FluidSynth exits immediately on
+        ;; a bad SoundFont or unusable audio driver.
+        (accept-process-output process 0.3)
+        (unless (process-live-p process)
+          (setq piano--synth-process nil)
+          (user-error "FluidSynth exited at startup: %s"
+                      (or (piano--synth-error-tail) "unknown error")))))))
 
 (defun piano--start ()
   "Start the synthesizer and the key reader."
@@ -320,7 +380,7 @@ kept in a process property until they are finished."
   (pcase piano-input
     ('keys-helper (piano--start-helper))
     ('emacs-keys nil)
-    ('auto (if (executable-find piano-keys-program)
+    ('auto (if (piano--find-keys-program)
                (piano--start-helper)
              (message "piano-keys not found; using Emacs keys (timer-based release)"))))
   (add-hook 'window-buffer-change-functions #'piano--window-changed))
@@ -391,6 +451,79 @@ kept in a process property until they are finished."
             "M-x piano-mode stops the instrument; kill this buffer to quit\n")
     (add-text-properties (point-min) (point-max)
                          '(piano-layout t))))
+
+(defun piano-test-note (&optional midi)
+  "Play MIDI note MIDI (default 60) briefly, to test the sound path."
+  (interactive)
+  (let ((note (or midi 60)))
+    (unless (and piano--synth-process
+                 (process-live-p piano--synth-process))
+      (piano--start-synth))
+    (piano--note-on note)
+    (run-at-time 0.8 nil #'piano--note-off note)))
+
+(defun piano--doctor-devices ()
+  "Return a line about /dev/input visibility."
+  (if (not (memq system-type '(gnu/linux gnu/kfreebsd)))
+      ""
+    (let ((devices (ignore-errors
+                     (directory-files "/dev/input" t "^event[0-9]+$"))))
+      (cond ((null devices)
+             "  devices:   no /dev/input/event* devices visible\n")
+            ((seq-some #'file-readable-p devices)
+             "  devices:   keyboard event devices are readable\n")
+            (t
+             "  devices:   event devices exist but are NOT readable (join the input group or add a udev uaccess rule)\n")))))
+
+(defun piano--doctor-tail (buffer-name)
+  "Return the last stderr of BUFFER-NAME, or an empty string."
+  (let ((text (with-current-buffer (get-buffer-create buffer-name)
+                (buffer-string))))
+    (if (string-empty-p (string-trim text))
+        ""
+      (format "  errors:    %s\n" (string-trim text)))))
+
+(defun piano--doctor-report ()
+  "Build the diagnostic report string."
+  (let* ((synth (executable-find piano-synth-program))
+         (soundfont (piano--soundfont))
+         (keys (piano--find-keys-program))
+         (synth-live (and piano--synth-process
+                          (process-live-p piano--synth-process)))
+         (keys-live (and piano--keys-process
+                         (process-live-p piano--keys-process)))
+         (input (if keys-live "native helper (running)"
+                  (if keys "native helper (available)"
+                    "Emacs key events (timer release)"))))
+    (concat
+     "piano-mode doctor\n\n"
+     "Synthesizer\n"
+     (format "  program:   %s\n"
+             (or synth (format "%S is not installed" piano-synth-program)))
+     (format "  soundfont: %s\n" (or soundfont "NOT FOUND"))
+     (format "  audio:     %s\n" (or piano-audio-driver "FluidSynth default"))
+     (format "  process:   %s\n" (if synth-live "running" "not running"))
+     (piano--doctor-tail " *piano-fluidsynth-errors*")
+     "\nKey reader\n"
+     (format "  program:   %s\n"
+             (or keys (format "%S is not installed" piano-keys-program)))
+     (format "  input:     %s\n" input)
+     (piano--doctor-devices)
+     (piano--doctor-tail " *piano-keys-errors*")
+     "\nTry it\n"
+     "  M-x piano-play, then press the mapped keys in the *piano* buffer.\n"
+     "  M-x piano-test-note plays a note through the synthesizer only.\n")))
+
+(defun piano-doctor ()
+  "Show a diagnostic report for the piano pipeline."
+  (interactive)
+  (with-current-buffer (get-buffer-create "*Piano Doctor*")
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (piano--doctor-report)))
+    (goto-char (point-min))
+    (special-mode))
+  (display-buffer (get-buffer "*Piano Doctor*")))
 
 (add-hook 'kill-emacs-hook #'piano--stop)
 
