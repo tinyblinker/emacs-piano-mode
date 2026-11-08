@@ -19,10 +19,11 @@ With Emacs 30 or newer, install the package and start it with:
 #+end_src
 
 Then run =M-x piano-play=; =M-x piano-mode= (or killing the
-=*piano*= buffer) stops it.  The package needs FluidSynth, a Rust
-toolchain (the bundled =piano-keys= reader is built automatically on
-first use), and a SoundFont (install a system one such as
-=fluid-soundfont-gm=, or set =piano-soundfont=).  Reading
+=*piano*= buffer) stops it.  The package currently supports Linux
+only.  It needs FluidSynth, a Rust toolchain (the bundled
+=piano-keys= reader is built automatically on first use), and a
+SoundFont (install a system one such as =fluid-soundfont-gm=, or set
+=piano-soundfont=).  Reading
 =/dev/input= requires either membership in the =input= group or a
 udev =uaccess= rule; without that, Emacs cannot see the keyboard
 device.  If an older checkout is already installed, remove
