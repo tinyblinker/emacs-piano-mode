@@ -45,14 +45,19 @@ Used to find the SoundFont bundled next to the loaded file.")
     ("p" . 75) (";" . 76))
   "Alist mapping key names to MIDI note numbers.
 
-Key names are single letters, digits or punctuation accepted by the
-`piano-keys' program."
+Each element is (KEY . MIDI).  KEY is a single letter, digit or
+punctuation character accepted by `piano-keys-program'; MIDI is a
+note number, with middle C as 60.  Changing this rebuilds the keymap
+and restarts a running key reader."
   :group 'piano
   :type '(alist :key-type string :value-type integer)
   :set (lambda (symbol value)
          (set-default symbol value)
+         ;; piano-mode-map is unbound while the file is still loading,
+         ;; so everything after the guard only runs on real changes.
          (when (boundp 'piano-mode-map)
-           (piano--rebuild-map))))
+           (piano--rebuild-map)
+           (piano--restart-helper))))
 
 (defcustom piano-keys-program "piano-keys"
   "Name (or path) of the native key reader program."
@@ -518,71 +523,6 @@ set `piano-soundfont'"))))
       (piano--start-synth))
     (piano--note-on note)
     (run-at-time 0.8 nil #'piano--note-off note)))
-
-(defun piano--doctor-devices ()
-  "Return lines listing the readable keyboards and the active choice."
-  (let* ((program (piano--find-keys-program))
-         (devices (and program (ignore-errors (piano--list-devices program)))))
-    (if (null devices)
-        "  keyboards: none readable; check /dev/input access (udev uaccess or the input group)\n"
-      (concat
-       "  keyboards:\n"
-       (mapconcat (lambda (cell) (format "    - %s\n" (car cell))) devices "")
-       (format "  chosen:    %s\n"
-               (if (and (stringp piano-device)
-                        (not (string-empty-p piano-device)))
-                   piano-device
-                 "auto-detect"))))))
-
-(defun piano--doctor-tail (buffer-name)
-  "Return the last stderr of BUFFER-NAME, or an empty string."
-  (let ((text (with-current-buffer (get-buffer-create buffer-name)
-                (buffer-string))))
-    (if (string-empty-p (string-trim text))
-        ""
-      (format "  errors:    %s\n" (string-trim text)))))
-
-(defun piano--doctor-report ()
-  "Build the diagnostic report string."
-  (let* ((synth (executable-find piano-synth-program))
-         (soundfont (piano--soundfont))
-         (keys (piano--find-keys-program))
-         (synth-live (and piano--synth-process
-                          (process-live-p piano--synth-process)))
-         (keys-live (and piano--keys-process
-                         (process-live-p piano--keys-process))))
-    (concat
-     "piano-mode doctor\n\n"
-     "Synthesizer\n"
-     (format "  program:   %s\n"
-             (or synth (format "%S is not installed" piano-synth-program)))
-     (format "  soundfont: %s\n" (or soundfont "NOT FOUND"))
-     (format "  audio:     %s%s\n"
-             (or piano-audio-driver "FluidSynth default")
-             (if piano-audio-driver "" " (try \"pipewire\" if you hear nothing)"))
-     (format "  process:   %s\n" (if synth-live "running" "not running"))
-     (piano--doctor-tail " *piano-fluidsynth-errors*")
-     "\nKey reader\n"
-     (format "  program:   %s\n"
-             (or keys (format "%S is not installed" piano-keys-program)))
-     (format "  process:   %s\n" (if keys-live "running" "not running"))
-     (piano--doctor-devices)
-     (piano--doctor-tail " *piano-keys-errors*")
-     "\nTry it\n"
-     "  M-x piano-play, then press the mapped keys in the *piano* buffer.\n"
-     "  M-x piano-test-note plays a note through the synthesizer only.\n")))
-
-;;;###autoload
-(defun piano-doctor ()
-  "Show a diagnostic report for the piano pipeline."
-  (interactive)
-  (with-current-buffer (get-buffer-create "*Piano Doctor*")
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert (piano--doctor-report)))
-    (goto-char (point-min))
-    (special-mode))
-  (display-buffer (get-buffer "*Piano Doctor*")))
 
 (add-hook 'kill-emacs-hook #'piano--stop)
 
