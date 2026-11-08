@@ -25,13 +25,25 @@
 (require 'seq)
 (require 'subr-x)
 
-(defvar piano--load-dir
+(defun piano--guess-load-dir ()
+  "Return the directory piano-mode was loaded from, or nil.
+When `load-file-name' names a native-compiled .eln inside the eln
+cache, ask `locate-library' for the installed source directory
+instead."
   (let ((file (or (and (boundp 'load-file-name) load-file-name)
                   (buffer-file-name))))
-    (when file
-      (file-name-directory file)))
+    (cond
+     ((and file (not (string-suffix-p ".eln" file)))
+      (file-name-directory file))
+     ((when-let* ((library (locate-library "piano-mode")))
+        (file-name-directory library)))
+     (file
+      (file-name-directory file)))))
+
+(defvar piano--load-dir (piano--guess-load-dir)
   "Directory the package was loaded from, or nil.
-Used to find the SoundFont bundled next to the loaded file.")
+Used to find the SoundFont and the native key reader bundled next
+to the loaded file.")
 
 (defgroup piano nil
   "Play a piano from your computer keyboard."
@@ -71,6 +83,16 @@ device."
   :group 'piano
   :type '(repeat string))
 
+(defcustom piano-auto-build t
+  "Whether to build the bundled `piano-keys' reader when it is missing.
+The package ships the reader's Rust source under piano_core/.  When
+this is non-nil and a Rust toolchain is available, the first call to
+`piano-play' builds the reader in place; set it to nil to require a
+prebuilt `piano-keys' on the variable `exec-path' or in
+`piano-keys-program'."
+  :group 'piano
+  :type 'boolean)
+
 (defcustom piano-device nil
   "Evdev device path used by the key reader, or nil.
 
@@ -104,7 +126,8 @@ device, e.g. \"/dev/input/by-id/usb-Keychron_K8_Pro-event-kbd\".
 
 (defcustom piano-soundfont nil
   "SoundFont file for FluidSynth.
-If nil, try `PIANO_SOUNDFONT' and common system locations."
+If nil, try `PIANO_SOUNDFONT', a TimGM6mb.sf2 next to the loaded
+package, and common system locations."
   :group 'piano
   :type '(choice (const :tag "Auto-detect" nil) file))
 
@@ -215,6 +238,52 @@ a checkout just works."
                         (expand-file-name "piano_core/target/debug/piano-keys"
                                           piano--load-dir))))))
 
+(defun piano--keys-source-directory ()
+  "Return the bundled piano_core source directory, or nil."
+  (when piano--load-dir
+    (let ((directory (expand-file-name "piano_core" piano--load-dir)))
+      (when (file-exists-p (expand-file-name "Cargo.toml" directory))
+        directory))))
+
+(defun piano--find-cargo ()
+  "Return the Cargo executable, or nil."
+  (or (executable-find "cargo")
+      (let ((cargo (expand-file-name "~/.cargo/bin/cargo")))
+        (and (file-executable-p cargo) cargo))))
+
+(defun piano--build-keys-program ()
+  "Build the bundled piano-keys reader and return its path.
+Return nil when auto-building is disabled, `piano-keys-program' is
+customized, or no source tree or Rust toolchain is available.
+Signal a `user-error' when the build fails."
+  (when (and piano-auto-build
+             (string= piano-keys-program "piano-keys"))
+    (when-let* ((directory (piano--keys-source-directory))
+                (cargo (piano--find-cargo)))
+      (message "piano-mode: building piano-keys (first run)...")
+      (let ((buffer (get-buffer-create " *piano-keys-build*")))
+        (with-current-buffer buffer
+          (erase-buffer))
+        (let ((status (call-process
+                       cargo nil buffer nil
+                       "build" "--release" "--locked"
+                       "--manifest-path"
+                       (expand-file-name "Cargo.toml" directory))))
+          (unless (and (integerp status) (zerop status))
+            (user-error "Building piano-keys failed; see buffer %s"
+                        (buffer-name buffer)))))
+      (message "piano-mode: piano-keys built")
+      (piano--find-keys-program))))
+
+(defun piano--ensure-keys-program ()
+  "Return the piano-keys executable, building it when necessary."
+  (or (piano--find-keys-program)
+      (piano--build-keys-program)
+      (user-error "Key reader piano-keys not found (%S); install Rust and \
+run \"cargo build --release\" in %s, or set `piano-keys-program'"
+                  piano-keys-program
+                  (or (piano--keys-source-directory) "piano_core/"))))
+
 (defun piano--parse-devices (text)
   "Return an alist of (LABEL . PATH) for the keyboard lines in TEXT."
   (let ((devices nil))
@@ -272,9 +341,7 @@ to the input group (or grant udev uaccess access) and try again"))
   "Choose the keyboard device for `piano-mode' and save the choice."
   (interactive)
   (let* ((piano-device nil)              ; force a fresh prompt
-         (program (or (piano--find-keys-program)
-                      (user-error "Key reader piano-keys not found (%S)"
-                                  piano-keys-program)))
+         (program (piano--ensure-keys-program))
          (device (piano--select-device program)))
     (customize-save-variable 'piano-device device)
     ;; A running reader still reads the old device: restart it so the
@@ -335,12 +402,7 @@ kept in a process property until they are finished."
 (defun piano--start-helper ()
   "Start the native key reader."
   (unless (process-live-p piano--keys-process)
-    (let* ((program
-            (or (piano--find-keys-program)
-                (user-error
-                 "Key reader piano-keys not found (%S); run \"cargo build --release\" \
-in piano_core/ and put target/release/piano-keys on PATH, or set `piano-keys-program'"
-                 piano-keys-program)))
+    (let* ((program (piano--ensure-keys-program))
            (device (piano--select-device program)))
       (with-current-buffer (get-buffer-create " *piano-keys-errors*")
         (erase-buffer))

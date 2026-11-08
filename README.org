@@ -1,38 +1,14 @@
 #+title: piano-mode
-#+options: toc:3
+#+options: toc:nil
 
 Turn your computer keyboard into a piano inside Emacs, with real
-key-down / key-up tracking.
+key-down / key-up tracking: notes keep sounding exactly as long as
+you hold a key.
 
-* Features
-- *True key-up*: notes keep sounding exactly as long as you hold the
-  key — no fixed note length, no auto-release.
-- *Low dependency*: a single Elisp file (zero third-party Emacs
-  packages) plus one small Rust binary with zero crate dependencies.
-- *Linux*: works under both X11 and Wayland sessions.
-- *No root*: only read access to =/dev/input= is needed, which the
-  logged-in user normally has (udev =uaccess=; the =input= group is
-  the fallback).
-- Chords and polyphony through one persistent FluidSynth process.
-
-* Requirements
-- GNU Emacs >= 28
-- Rust toolchain (only needed to build ~piano-keys~)
-- FluidSynth and a SoundFont, e.g. on Debian/Ubuntu:
-  #+begin_src sh
-  sudo apt install fluidsynth fluid-soundfont-gm
-  #+end_src
-
-* Install
-
-** With use-package and :vc (built-in package manager, no manual clone)
-
-The Elisp package installs straight from this repository with Emacs'
-built-in package manager.  The native ~piano-keys~ reader is not
-shipped as an Elisp file, so build it once (see below).
+* Install and use
+With Emacs 30 or newer, install the package and start it with:
 
 #+begin_src elisp
-;; Emacs >= 30 (use-package with :vc):
 (use-package piano-mode
   :vc (:url "https://github.com/tinyblinker/emacs-piano-mode")
   :custom
@@ -40,169 +16,33 @@ shipped as an Elisp file, so build it once (see below).
   ;; (KEY . MIDI) pairs; middle C is 60.
   (piano-keys '(("a" . 60) ("w" . 61) ("s" . 62)))
   (piano-transpose 12))
-
-;; Emacs >= 29.1 (plain package-vc):
-(package-vc-install "https://github.com/tinyblinker/emacs-piano-mode")
 #+end_src
 
-The native key reader is built once, separately:
-
-#+begin_src sh
-git clone https://github.com/tinyblinker/emacs-piano-mode
-cargo build --release --manifest-path emacs-piano-mode/piano_core/Cargo.toml
-install -Dm755 emacs-piano-mode/piano_core/target/release/piano-keys ~/.local/bin/piano-keys
-#+end_src
-
-** Manually
-
-#+begin_src elisp
-(add-to-list 'load-path "/path/to/emacs-piano-mode")
-(require 'piano-mode)
-#+end_src
-
-When the package is loaded straight from this repository (with
-=eval-buffer= or =load-file=), the bundled
-=piano_core/src/TimGM6mb.sf2= SoundFont is found automatically.
-=piano-keys= itself must be reachable through =exec-path= (e.g.
-=~/.local/bin=, as installed above) or =piano-keys-program=.
-
-** MELPA
-
-The package follows MELPA conventions (package-lint and checkdoc are
-clean).  A MELPA recipe would be:
-
-#+begin_src elisp
-(piano-mode
- :fetcher github
- :repo "tinyblinker/emacs-piano-mode"
- :files ("piano-mode.el"))
-#+end_src
-
-* Usage
-
-=M-x piano-play= opens the =*piano*= buffer and starts everything.
-Run =M-x piano-mode= (or kill the buffer) to stop the instrument.
-
-#+begin_src text
-  W E   T Y U   O P
-A S D F G H J K L ;
-#+end_src
-
-| key | note | key | note | key | note |
-|-----+------+-----+------+-----+------|
-| a   | C4   | g   | G4   | k   | C5   |
-| w   | C#4  | y   | G#4  | o   | C#5  |
-| s   | D4   | h   | A4   | l   | D5   |
-| e   | D#4  | u   | A#4  | p   | D#5  |
-| d   | E4   | j   | B4   | ;   | E5   |
-| f   | F4   |     |      |     |      |
-| t   | F#4  |     |      |     |      |
-
-The mapped keys are read *globally* by =piano-keys=.  While the
-=*piano*= buffer has focus they do not insert text, and focus tracking
-releases all notes as soon as you leave it — other buffers keep normal
-typing.
+Then run =M-x piano-play=; =M-x piano-mode= (or killing the
+=*piano*= buffer) stops it.  The package needs FluidSynth, a Rust
+toolchain (the bundled =piano-keys= reader is built automatically on
+first use), and a SoundFont (install a system one such as
+=fluid-soundfont-gm=, or set =piano-soundfont=).  Reading
+=/dev/input= requires either membership in the =input= group or a
+udev =uaccess= rule; without that, Emacs cannot see the keyboard
+device.  If an older checkout is already installed, remove
+=~/.config/emacs/elpa/piano-mode= (or run =M-x package-vc-upgrade=)
+and evaluate the form again.
 
 * How it works
-
-#+begin_src text
-physical keyboard
-      │  OS key state, polled (default 4 ms)
-      ▼
-piano-keys  (Rust, zero crates, no root/input group)
-      │  "down A" / "up A" lines on stdout
-      ▼
-piano-mode.el  (key → MIDI map, note state, focus gate)
-      │  "noteon 0 60 100" / "noteoff 0 60" lines on stdin
-      ▼
-FluidSynth  (one persistent process)
-#+end_src
-
-* Keyboard input
-
-=piano-keys= reads the kernel evdev ABI from =/dev/input= directly —
-the same device files X11 and Wayland compositors use, and independent
-of both.  It works in X11 and Wayland sessions alike, and only needs
-read access to the keyboard device (udev =uaccess= grants it to the
-logged-in user; otherwise add yourself to the =input= group).
-
-*Choosing a keyboard with several plugged in:* on the first =M-x
-piano-play= the key reader lists the keyboards it can see and Emacs
-asks which one to use (a single keyboard is picked automatically).
-The answer is saved to =piano-device=, so the prompt appears only
-once; =M-x piano-select-device= re-asks and saves a new answer.  The
-=*piano*= buffer header shows which device is active.
-
-*Wayland note:* Wayland deliberately hides global keyboard state from
-applications; =piano-keys= bypasses it by reading =/dev/input=
-directly, which the logged-in user can normally read on systemd
-distributions (the =uaccess= udev tag).  If your setup denies access,
-add yourself to the =input= group.
+=piano-keys= reads raw key state from the Linux evdev ABI under
+=/dev/input=, reports key-down and key-up lines to Emacs, and Emacs
+maps those keys to MIDI notes and drives one persistent FluidSynth
+process.  The mapped keys are suppressed only while the =*piano*=
+buffer is selected, and leaving the buffer releases every sounding
+note.
 
 * Configuration
-
-| variable              | default      | meaning                                   |
-|-----------------------+--------------+-------------------------------------------|
-| =piano-keys=            | alist        | key names → MIDI notes                    |
-| =piano-transpose=       | 0            | semitone shift                            |
-| =piano-velocity=        | 100          | MIDI velocity                             |
-| =piano-keys-program=    | "piano-keys" | key reader executable                     |
-| =piano-keys-extra-args= | nil          | extra reader arguments                    |
-| =piano-device=          | nil          | evdev device path; nil asks interactively |
-| =piano-poll-ms=         | 4            | key polling interval                      |
-| =piano-synth-program=   | "fluidsynth" | synthesizer executable                    |
-| =piano-soundfont=       | auto         | SoundFont path                            |
-| =piano-audio-driver=    | nil          | FluidSynth audio driver                   |
-| =piano-gain=            | 0.5          | FluidSynth master gain                    |
-
-While the =*piano*= buffer has focus, the mapped keys do not insert
-text; leaving it releases all notes.
-
-* Troubleshooting
-- *No sound at all*: run =M-x piano-test-note= to test the synthesizer
-  alone.  Every failed step raises a =user-error= explaining the
-  cause, so check the =*Messages*= buffer when something is silent.
-- *piano-keys not found*: build it (=cargo build --release= in
-  =piano_core/=) and put =target/release/piano-keys= on =PATH=, or
-  point =piano-keys-program= at the built binary.
-- *The wrong keyboard plays*: run =M-x piano-select-device= to pick
-  the right one — the running reader is restarted immediately — or run
-  =piano-keys --list-devices= to see the candidates (stable paths live
-  under =/dev/input/by-id/=).
-- *FluidSynth not found*: install FluidSynth (e.g. =sudo apt install
-  fluidsynth=).
-- *=piano-keys exited (cannot list /dev/input ...)=*: the keyboard
-  devices could not be read.  See the Wayland note above.
-- *FluidSynth exited at startup*: the SoundFont or the audio driver is
-  unusable; the error shows FluidSynth's stderr.  Try
-  =piano-audio-driver= ("pipewire", "pulseaudio", "alsa") or another
-  SoundFont.
-- *No sound*: run =fluidsynth -a alsa -n /path/to/font.sf2= manually
-  and check the audio driver; set =piano-audio-driver=.
-- *Latency*: lower =piano-poll-ms= (default 4 ms) and check
-  FluidSynth's audio buffer settings.
-- *Stuck note*: =M-x piano-mode= releases everything.
-
-* Development
-#+begin_src sh
-  # Rust
-  cargo fmt --check
-  cargo clippy --locked --all-targets -- -D warnings
-  cargo test --locked
-  # Elisp
-  emacs --batch -Q -f batch-byte-compile piano-mode.el
-  emacs --batch -Q -L . -l test/piano-mode-test.el -f ert-run-tests-batch-and-exit
-#+end_src
-
-* Roadmap
-- [X] zero-dependency Linux key reader (=piano-keys=)
-- [X] real key-up note on/off via FluidSynth
-- [ ] prebuilt =piano-keys= binaries attached to releases
-- [ ] on-screen keyboard with pressed-key highlighting
-- [ ] octave shift and multi-octave layouts
-- [ ] MIDI recording/export
+Customize =piano-keys=, =piano-transpose=, =piano-soundfont=,
+=piano-audio-driver=, =piano-keys-program=, =piano-device=, and
+=piano-auto-build= with =M-x customize-group RET piano RET=.
+If startup fails, check =*Messages*=: the error names the missing
+SoundFont, FluidSynth, Cargo, or permission problem.
 
 * License
-
-GPL-3.0-or-later (see =LICENSE=).  Any bundled SoundFont carries its
-own license.
+GPL-3.0-or-later (see =LICENSE=).
