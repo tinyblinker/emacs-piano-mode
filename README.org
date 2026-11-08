@@ -6,8 +6,10 @@ key-down / key-up tracking: notes keep sounding exactly as long as
 you hold a key.
 
 * Dependencies
-=piano-mode= currently supports Linux only.  On Arch Linux the
-dependencies are:
+=piano-mode= currently supports Linux only.  The installation
+examples below are for Arch Linux; users of other distributions
+should install the equivalent FluidSynth, SoundFont, Rust/Cargo,
+and input-permission packages with their own package manager.
 
 - *FluidSynth* — the software synthesizer:
   #+begin_src sh
