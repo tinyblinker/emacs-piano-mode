@@ -141,6 +141,73 @@ Return PREDICATE's final value."
             (should (equal (piano--find-keys-program) binary))))
       (delete-directory dir t))))
 
+(ert-deftest piano-test-load-dir-source ()
+  "A source or byte-code file yields its own directory."
+  (let ((load-file-name "/tmp/piano-mode.el"))
+    (should (equal (piano--guess-load-dir) "/tmp/"))))
+
+(ert-deftest piano-test-load-dir-eln ()
+  "A native-compiled file falls back to `locate-library'."
+  (let ((load-file-name "/tmp/eln-cache/piano-mode.eln"))
+    (cl-letf (((symbol-function 'locate-library)
+               (lambda (_library) "/repo/piano-mode.elc")))
+      (should (equal (piano--guess-load-dir) "/repo/")))))
+
+(ert-deftest piano-test-build-keys-program ()
+  "A missing bundled reader is built on demand."
+  (let ((directory (make-temp-file "piano-repo" t))
+        (piano-keys-program "piano-keys")
+        (piano-auto-build t)
+        (piano--load-dir nil))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "piano_core" directory) t)
+          (write-region "" nil
+                        (expand-file-name "piano_core/Cargo.toml" directory))
+          (setq piano--load-dir directory)
+          (cl-letf (((symbol-function 'executable-find)
+                     (lambda (name)
+                       (if (equal name "cargo") "/fake/cargo" nil)))
+                    ((symbol-function 'call-process)
+                     (lambda (_program _infile _destination _display &rest args)
+                       (should (equal args
+                                      (list "build" "--release" "--locked"
+                                            "--manifest-path"
+                                            (expand-file-name
+                                             "piano_core/Cargo.toml" directory))))
+                       (let ((binary
+                              (expand-file-name
+                               "piano_core/target/release/piano-keys"
+                               directory)))
+                         (make-directory (file-name-directory binary) t)
+                         (write-region "" nil binary)
+                         (set-file-modes binary #o755))
+                       0)))
+            (should (equal
+                     (piano--ensure-keys-program)
+                     (expand-file-name
+                      "piano_core/target/release/piano-keys" directory)))))
+      (delete-directory directory t))))
+
+(ert-deftest piano-test-soundfont-next-to-package ()
+  "A SoundFont next to the loaded package is found."
+  (let ((directory (make-temp-file "piano-repo" t))
+        (piano-soundfont nil)
+        (piano--load-dir nil)
+        (process-environment
+         (delete "PIANO_SOUNDFONT" process-environment)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "piano_core/src" directory) t)
+          (write-region "" nil
+                        (expand-file-name
+                         "piano_core/src/TimGM6mb.sf2" directory))
+          (setq piano--load-dir directory)
+          (should (equal (piano--soundfont)
+                         (expand-file-name
+                          "piano_core/src/TimGM6mb.sf2" directory))))
+      (delete-directory directory t))))
+
 (ert-deftest piano-test-parse-devices ()
   "Keyboard lines in --list-devices output become (LABEL . PATH) pairs."
   (should
@@ -235,7 +302,7 @@ Return PREDICATE's final value."
   (let ((saved 'unset)
         (restarted nil)
         (piano-device nil))
-    (cl-letf (((symbol-function 'piano--find-keys-program)
+    (cl-letf (((symbol-function 'piano--ensure-keys-program)
                (lambda () "piano-keys"))
               ((symbol-function 'piano--select-device)
                (lambda (_program) "/dev/input/event5"))
