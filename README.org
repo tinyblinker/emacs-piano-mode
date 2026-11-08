@@ -62,8 +62,10 @@ With Emacs 30 or newer, install the package and start it with:
   (piano-keys-extra-args nil)
   ;; Build the bundled Rust reader on first use when Cargo is available.
   (piano-auto-build t)
-  ;; Pin a keyboard device, or nil to list keyboards and ask once.
-  (piano-device nil)
+  ;; Pin a keyboard; `M-x piano-select-device' saves a stable
+  ;; /dev/input/by-id or by-path link.  Do not set this to nil here if
+  ;; you use that command: it clears the saved choice.
+  ;; (piano-device "/dev/input/by-id/usb-Your_Keyboard-event-kbd")
   ;; Keyboard polling interval in milliseconds.
   (piano-poll-ms 4)
   ;; Semitones added to every note.
@@ -82,24 +84,48 @@ With Emacs 30 or newer, install the package and start it with:
 #+end_src
 
 Then run =M-x piano-play=; =M-x piano-mode= (or killing the
-=*piano*= buffer) stops it.  If an older checkout is already
-installed, remove =~/.config/emacs/elpa/piano-mode= (or run
-=M-x package-vc-upgrade=) and evaluate the form again.
+=*piano*= buffer) stops it.  Changing =piano-keys= takes effect
+immediately, as do =piano-transpose= and =piano-velocity=.  Reader
+options restart =piano-keys=; synthesizer options restart
+FluidSynth when it is running.  =piano-device= set to a non-nil path
+restarts the reader; set it to nil only if you want to clear the
+saved choice, and use =M-x piano-select-device= to choose a device.
+If an older checkout is already installed, remove
+=~/.config/emacs/elpa/piano-mode= (or run =M-x package-vc-upgrade=)
+and evaluate the form again.
 
 * How it works
 =piano-keys= reads raw key state from the Linux evdev ABI under
 =/dev/input=, reports key-down and key-up lines to Emacs, and Emacs
 maps those keys to MIDI notes and drives one persistent FluidSynth
-process.  The mapped keys are suppressed only while the =*piano*=
-buffer is selected, and leaving the buffer releases every sounding
-note.
+process.  The =*piano*= buffer ignores every printable key, so
+=special-mode= commands such as =g= and =q= and digit arguments
+cannot fire.  Only keys present in =piano-keys= produce notes, and
+events are processed only while the =*piano*= buffer is selected;
+leaving it releases every sounding note.
 
 * Configuration
-The example above sets every =defcustom= in the package.  Use
+The example above shows every =defcustom= in the package;
+=piano-device= is commented out because setting it to nil would
+clear a choice saved by =M-x piano-select-device=.  Use
 =M-x customize-group RET piano RET= to see their full documentation
 and current values; =:custom= in =use-package= is equivalent.
+Reader and synthesizer options restart the affected process when it
+is running; otherwise they take effect on the next start.
 If startup fails, check =*Messages*=: the error names the missing
-SoundFont, FluidSynth, Cargo, or permission problem.
+SoundFont, FluidSynth, Cargo, piano-keys, or permission problem.
+
+* Troubleshooting
+- *No sound*: make sure the key is in =piano-keys=, the =*piano*=
+  buffer is selected, and the saved =piano-device= is the keyboard
+  you are using.  =M-x piano-select-device= picks and saves a stable
+  device path.  =M-x piano-test-note= tests the synthesizer alone.
+- *Missing dependency*: startup errors name the missing FluidSynth,
+  SoundFont, Cargo, or =piano-keys= binary.  See the Dependencies
+  section above.
+- *Reader or synth exited*: the reason is shown in =*Messages*=;
+  detailed stderr is in =*piano-keys-errors*= or
+  =*piano-fluidsynth-errors*=.
 
 * License
 GPL-3.0-or-later (see =LICENSE=).
