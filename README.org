@@ -35,7 +35,11 @@ shipped as an Elisp file, so build it once (see below).
 ;; Emacs >= 30 (use-package with :vc):
 (use-package piano-mode
   :vc (:url "https://github.com/tinyblinker/emacs-piano-mode")
-  :custom (piano-audio-driver "pipewire"))
+  :custom
+  (piano-audio-driver "pipewire")
+  ;; (KEY . MIDI) pairs; middle C is 60.
+  (piano-keys '(("a" . 60) ("w" . 61) ("s" . 62)))
+  (piano-transpose 12))
 
 ;; Emacs >= 29.1 (plain package-vc):
 (package-vc-install "https://github.com/tinyblinker/emacs-piano-mode")
@@ -127,8 +131,7 @@ piano-play= the key reader lists the keyboards it can see and Emacs
 asks which one to use (a single keyboard is picked automatically).
 The answer is saved to =piano-device=, so the prompt appears only
 once; =M-x piano-select-device= re-asks and saves a new answer.  The
-=*piano*= buffer header and =M-x piano-doctor= show which device is
-active.
+=*piano*= buffer header shows which device is active.
 
 *Wayland note:* Wayland deliberately hides global keyboard state from
 applications; =piano-keys= bypasses it by reading =/dev/input=
@@ -156,9 +159,9 @@ While the =*piano*= buffer has focus, the mapped keys do not insert
 text; leaving it releases all notes.
 
 * Troubleshooting
-- *No sound at all*: run =M-x piano-doctor= — it reports the
-  synthesizer, SoundFont, key reader and device access in one buffer —
-  and =M-x piano-test-note= to test the synthesizer alone.
+- *No sound at all*: run =M-x piano-test-note= to test the synthesizer
+  alone.  Every failed step raises a =user-error= explaining the
+  cause, so check the =*Messages*= buffer when something is silent.
 - *piano-keys not found*: build it (=cargo build --release= in
   =piano_core/=) and put =target/release/piano-keys= on =PATH=, or
   point =piano-keys-program= at the built binary.

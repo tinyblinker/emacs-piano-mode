@@ -113,6 +113,20 @@ Return PREDICATE's final value."
   (should (equal (piano--helper-keys-argument)
                  "A,W,S,E,D,F,T,G,Y,H,U,J,K,O,L,P,;")))
 
+(ert-deftest piano-test-keys-custom-set ()
+  "Changing `piano-keys' rebuilds the map and restarts the reader."
+  (let ((old-keys piano-keys)
+        (old-map piano-mode-map)
+        (restarted nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'piano--restart-helper)
+                   (lambda () (setq restarted t))))
+          (customize-set-variable 'piano-keys '(("a" . 72)))
+          (should (eq (lookup-key piano-mode-map "a") #'piano-play-key))
+          (should-not (eq old-map piano-mode-map))
+          (should restarted))
+      (customize-set-variable 'piano-keys old-keys))))
+
 (ert-deftest piano-test-find-keys-program-repo ()
   "A sibling build inside the repository is found without PATH."
   (let ((dir (make-temp-file "piano-repo" t)))
