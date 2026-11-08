@@ -5,6 +5,48 @@ Turn your computer keyboard into a piano inside Emacs, with real
 key-down / key-up tracking: notes keep sounding exactly as long as
 you hold a key.
 
+* Dependencies
+=piano-mode= currently supports Linux only.  The installation
+examples below are for Arch Linux; users of other distributions
+should install the equivalent FluidSynth, SoundFont, Rust/Cargo,
+and input-permission packages with their own package manager.
+
+- *FluidSynth* — the software synthesizer:
+  #+begin_src sh
+  sudo pacman -S fluidsynth
+  #+end_src
+- *SoundFont* — the instrument samples.  The Arch package installs
+  =/usr/share/soundfonts/FluidR3_GM.sf2=, which is found
+  automatically; otherwise install another =.sf2= file and set
+  =piano-soundfont=:
+  #+begin_src sh
+  sudo pacman -S soundfont-fluid
+  #+end_src
+- *Cargo* — builds the bundled =piano-keys= reader on first use:
+  #+begin_src sh
+  sudo pacman -S rust
+  #+end_src
+  With rustup instead:
+  #+begin_src sh
+  sudo pacman -S rustup
+  rustup default stable
+  #+end_src
+- */dev/input access* — either add your user to the =input= group
+  and log out and back in:
+  #+begin_src sh
+  sudo usermod -aG input "$USER"
+  #+end_src
+  or grant the active session access with a udev rule:
+  #+begin_src sh
+  sudo tee /etc/udev/rules.d/99-piano-keys.rules >/dev/null <<'EOF'
+  KERNEL=="event*", SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+  EOF
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger
+  #+end_src
+  Verify with =ls -l /dev/input/event*=; once built,
+  =piano-keys --list-devices= lists readable keyboards.
+
 * Install and use
 With Emacs 30 or newer, install the package and start it with:
 
@@ -31,7 +73,7 @@ With Emacs 30 or newer, install the package and start it with:
   ;; FluidSynth executable.
   (piano-synth-program "fluidsynth")
   ;; SoundFont path; nil checks PIANO_SOUNDFONT and system locations.
-  ;; (piano-soundfont "/usr/share/sounds/sf2/FluidR3_GM.sf2")
+  ;; (piano-soundfont "/usr/share/soundfonts/FluidR3_GM.sf2")
   (piano-soundfont nil)
   ;; FluidSynth audio driver; nil uses FluidSynth's default.
   (piano-audio-driver "pipewire")
@@ -40,16 +82,9 @@ With Emacs 30 or newer, install the package and start it with:
 #+end_src
 
 Then run =M-x piano-play=; =M-x piano-mode= (or killing the
-=*piano*= buffer) stops it.  The package currently supports Linux
-only.  It needs FluidSynth, a Rust toolchain (the bundled
-=piano-keys= reader is built automatically on first use), and a
-SoundFont (install a system one such as =fluid-soundfont-gm=, or set
-=piano-soundfont=).  Reading
-=/dev/input= requires either membership in the =input= group or a
-udev =uaccess= rule; without that, Emacs cannot see the keyboard
-device.  If an older checkout is already installed, remove
-=~/.config/emacs/elpa/piano-mode= (or run =M-x package-vc-upgrade=)
-and evaluate the form again.
+=*piano*= buffer) stops it.  If an older checkout is already
+installed, remove =~/.config/emacs/elpa/piano-mode= (or run
+=M-x package-vc-upgrade=) and evaluate the form again.
 
 * How it works
 =piano-keys= reads raw key state from the Linux evdev ABI under
