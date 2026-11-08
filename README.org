@@ -12,10 +12,31 @@ With Emacs 30 or newer, install the package and start it with:
 (use-package piano-mode
   :vc (:url "https://github.com/tinyblinker/emacs-piano-mode")
   :custom
-  (piano-audio-driver "pipewire")
-  ;; (KEY . MIDI) pairs; middle C is 60.
+  ;; (KEY . MIDI) pairs; add as many as you like.  Middle C is 60.
   (piano-keys '(("a" . 60) ("w" . 61) ("s" . 62)))
-  (piano-transpose 12))
+  ;; Reader executable: a name on PATH or an absolute path.
+  (piano-keys-program "piano-keys")
+  ;; Extra reader arguments, e.g. '("--device" "/dev/input/event3").
+  (piano-keys-extra-args nil)
+  ;; Build the bundled Rust reader on first use when Cargo is available.
+  (piano-auto-build t)
+  ;; Pin a keyboard device, or nil to list keyboards and ask once.
+  (piano-device nil)
+  ;; Keyboard polling interval in milliseconds.
+  (piano-poll-ms 4)
+  ;; Semitones added to every note.
+  (piano-transpose 12)
+  ;; MIDI velocity, 1-127.
+  (piano-velocity 100)
+  ;; FluidSynth executable.
+  (piano-synth-program "fluidsynth")
+  ;; SoundFont path; nil checks PIANO_SOUNDFONT and system locations.
+  ;; (piano-soundfont "/usr/share/sounds/sf2/FluidR3_GM.sf2")
+  (piano-soundfont nil)
+  ;; FluidSynth audio driver; nil uses FluidSynth's default.
+  (piano-audio-driver "pipewire")
+  ;; FluidSynth master gain.
+  (piano-gain 0.5))
 #+end_src
 
 Then run =M-x piano-play=; =M-x piano-mode= (or killing the
@@ -39,9 +60,9 @@ buffer is selected, and leaving the buffer releases every sounding
 note.
 
 * Configuration
-Customize =piano-keys=, =piano-transpose=, =piano-soundfont=,
-=piano-audio-driver=, =piano-keys-program=, =piano-device=, and
-=piano-auto-build= with =M-x customize-group RET piano RET=.
+The example above sets every =defcustom= in the package.  Use
+=M-x customize-group RET piano RET= to see their full documentation
+and current values; =:custom= in =use-package= is equivalent.
 If startup fails, check =*Messages*=: the error names the missing
 SoundFont, FluidSynth, Cargo, or permission problem.
 
