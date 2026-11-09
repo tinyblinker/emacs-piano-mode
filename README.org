@@ -104,9 +104,10 @@ and evaluate the form again.
 maps those keys to MIDI notes and drives one persistent FluidSynth
 process.  The =*piano*= buffer ignores every printable key, so
 =special-mode= commands such as =g= and =q= and digit arguments
-cannot fire.  Only keys present in =piano-keys= produce notes, and
-events are processed only while the =*piano*= buffer is selected;
-leaving it releases every sounding note.
+cannot fire.  Only keys present in =piano-keys= produce notes.  Key
+presses are honored while the =*piano*= buffer is selected; key
+releases are always tracked, and leaving the buffer releases every
+sounding note.
 
 * Configuration
 The example above shows every =defcustom= in the package;
@@ -122,8 +123,9 @@ SoundFont, FluidSynth, Cargo, piano-keys, or permission problem.
 * Troubleshooting
 - *No sound*: make sure the key is in =piano-keys= (case does not
   matter), the =*piano*= buffer is selected, and the saved
-  =piano-device= is the keyboard you are using.  =M-x piano-select-device= picks and saves a stable
-  device path.  =M-x piano-test-note= tests the synthesizer alone.
+  =piano-device= is the keyboard you are using.
+  =M-x piano-select-device= picks and saves a stable device path.
+  =M-x piano-test-note= tests the synthesizer alone.
 - *Missing dependency*: startup errors name the missing FluidSynth,
   SoundFont, Cargo, or =piano-keys= binary.  See the Dependencies
   section above.
