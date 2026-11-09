@@ -309,7 +309,7 @@ Return PREDICATE's final value."
                    ("Keyboard A (/dev/input/event3)" . "/dev/input/event3"))))
               ((symbol-function 'completing-read)
                (lambda (_prompt choices &rest _args)
-                 (should (member "Auto-detect (first match)" choices))
+                 (should (member "Keyboard A (/dev/input/event3)" choices))
                  "Keyboard A (/dev/input/event3)"))
               ((symbol-function 'customize-save-variable)
                (lambda (_symbol value) (setq saved value)))
@@ -443,24 +443,6 @@ Return PREDICATE's final value."
     (should (member "noteoff 0 60\n" calls))
     (should (= 0 (hash-table-count piano--notes)))))
 
-(ert-deftest piano-test-select-device-auto ()
-  "Choosing auto-detect yields nil and saves nothing."
-  (let ((piano-device nil)
-        (saved 'unset))
-    (cl-letf (((symbol-function 'piano--list-devices)
-               (lambda (_program)
-                 '(("A (/dev/input/event3)" . "/dev/input/event3")
-                   ("B (/dev/input/event5)" . "/dev/input/event5"))))
-              ((symbol-function 'completing-read)
-               (lambda (_prompt _choices &rest _args)
-                 "Auto-detect (first match)"))
-              ((symbol-function 'customize-save-variable)
-               (lambda (_symbol value) (setq saved value)))
-              ((symbol-function 'piano--stable-device-path)
-               (lambda (path) path)))
-      (should (equal (piano--select-device "piano-keys") nil))
-      (should (eq saved 'unset)))))
-
 (ert-deftest piano-test-restart-helper ()
   "Restarting the reader picks up a changed `piano-device'."
   (piano-test-environment
@@ -480,17 +462,64 @@ Return PREDICATE's final value."
                               (process-command piano--keys-process))))
           (piano-mode -1))))))
 
+(ert-deftest piano-test-select-device-command-no-double-prompt ()
+  "Selecting a device restarts the reader without prompting again."
+  (piano-test-environment
+    (let ((old-device (default-value 'piano-device))
+          (prompts 0)
+          (answers '("Keyboard A (/dev/input/event3)"
+                     "Keyboard B (/dev/input/event5)")))
+      (setq-default piano-device nil)
+      (unwind-protect
+          (with-temp-buffer
+            (set-window-buffer (selected-window) (current-buffer))
+            (let ((piano--buffer (current-buffer)))
+              (cl-letf (((symbol-function 'piano--list-devices)
+                         (lambda (_program)
+                           '(("Keyboard A (/dev/input/event3)"
+                              . "/dev/input/event3")
+                             ("Keyboard B (/dev/input/event5)"
+                              . "/dev/input/event5"))))
+                        ((symbol-function 'completing-read)
+                         (lambda (_prompt _choices &rest _args)
+                           (setq prompts (1+ prompts))
+                           (pop answers)))
+                        ((symbol-function 'piano--stable-device-path)
+                         (lambda (path) path))
+                        ((symbol-function 'customize-save-variable)
+                         (lambda (symbol value)
+                           (customize-set-variable symbol value))))
+                (piano-mode 1)
+                (unwind-protect
+                    (progn
+                      (should (equal (default-value 'piano-device)
+                                     "/dev/input/event3"))
+                      (piano-select-device)
+                      (should (= prompts 2))
+                      (should (equal (default-value 'piano-device)
+                                     "/dev/input/event5"))
+                      (should (member "/dev/input/event5"
+                                      (process-command piano--keys-process))))
+                  (piano-mode -1)))))
+        (setq-default piano-device old-device)))))
+
 (ert-deftest piano-test-select-device-command ()
-  "The select-device command saves the pick."
+  "The select-device command forces a choice and saves the pick."
   (let ((saved 'unset)
-        (piano-device nil))
+        (forced nil)
+        (piano-device "/dev/input/event9"))
     (cl-letf (((symbol-function 'piano--ensure-keys-program)
                (lambda () "piano-keys"))
               ((symbol-function 'piano--select-device)
-               (lambda (_program) "/dev/input/event5"))
+               (lambda (_program &optional force)
+                 (setq forced force)
+                 "/dev/input/event5"))
               ((symbol-function 'customize-save-variable)
-               (lambda (_symbol value) (setq saved value))))
+               (lambda (_symbol value) (setq saved value)))
+              ((symbol-function 'piano--mode-running-p)
+               (lambda () nil)))
       (piano-select-device)
+      (should forced)
       (should (equal saved "/dev/input/event5")))))
 
 ;;; piano-mode-test.el ends here

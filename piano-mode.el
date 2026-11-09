@@ -347,13 +347,14 @@ run \"cargo build --release\" in %s, or set `piano-keys-program'"
           (directory-files "/dev/input/by-path" t "event-kbd\\'"))))
       path))
 
-(defun piano--select-device (program)
-  "Return the evdev device path to use, or nil for auto-detection.
-Reuse `piano-device' when PROGRAM still lists it; otherwise let the
-user choose a keyboard and save a stable path.  A single keyboard is
-used without asking."
+(defun piano--select-device (program &optional force)
+  "Return a keyboard path reported by PROGRAM.
+Reuse `piano-device' when PROGRAM still lists it.  Otherwise choose
+a keyboard, asking when there are several; a single keyboard is used
+without asking.  With FORCE, ignore `piano-device' and choose again."
   (let ((devices (piano--list-devices program))
-        (saved (and (stringp piano-device)
+        (saved (and (not force)
+                    (stringp piano-device)
                     (not (string-empty-p piano-device))
                     piano-device)))
     (cond
@@ -374,14 +375,12 @@ to the input group (or grant udev uaccess access) and try again"))
         (setq piano-device nil))
       (if (null (cdr devices))
           (piano--stable-device-path (cdar devices))
-        (let* ((choices (cons "Auto-detect (first match)"
-                              (mapcar #'car devices)))
-               (choice (completing-read "Keyboard device: " choices nil t)))
-          (unless (string-prefix-p "Auto-detect" choice)
-            (let ((path (piano--stable-device-path
-                         (cdr (assoc choice devices)))))
-              (customize-save-variable 'piano-device path)
-              path))))))))
+        (let* ((choices (mapcar #'car devices))
+               (choice (completing-read "Keyboard device: " choices nil t))
+               (path (piano--stable-device-path
+                      (cdr (assoc choice devices)))))
+          (customize-save-variable 'piano-device path)
+          path))))))
 
 (defun piano--device-label ()
   "Return the configured device path, or \"auto-detect\"."
@@ -394,16 +393,18 @@ to the input group (or grant udev uaccess access) and try again"))
 (defun piano-select-device ()
   "Choose the keyboard device for `piano-mode' and save the choice."
   (interactive)
-  (let* ((piano-device nil)              ; force a fresh choice
-         (program (piano--ensure-keys-program))
-         (device (piano--select-device program)))
+  (let* ((program (piano--ensure-keys-program))
+         (device (piano--select-device program t)))
+    ;; A prompt already saved the choice and restarted a live reader.
+    ;; Saving here covers a single keyboard; the setter skips an
+    ;; unchanged value.
     (customize-save-variable 'piano-device device)
-    ;; A live reader was restarted by the option setter.  If it had
-    ;; died, start it again now that the mode is still active.
+    ;; If the reader had died, start it again now that the mode is
+    ;; still active.
     (when (and (piano--mode-running-p)
                (not (process-live-p piano--keys-process)))
       (piano--restart-helper))
-    (message "Piano keyboard device: %s" (or device "auto-detect"))))
+    (message "Piano keyboard device: %s" device)))
 
 ;;; Key events
 
