@@ -135,20 +135,21 @@ Return PREDICATE's final value."
                  "A,W,S,E,D,F,T,G,Y,H,U,J,K,O,L,P,;")))
 
 (ert-deftest piano-test-keys-custom-set ()
-  "Changing `piano-keys' updates the active map and restarts the reader."
+  "Changing `piano-keys' restarts the reader and leaves the map alone."
   (let ((old-keys piano-keys)
         (old-map piano-mode-map)
         (restarted nil))
     (unwind-protect
         (cl-letf (((symbol-function 'piano--restart-helper)
                    (lambda () (setq restarted t))))
-          (customize-set-variable 'piano-keys '(("a" . 72)))
-          (should (eq (lookup-key piano-mode-map "a") #'ignore))
+          (customize-set-variable 'piano-keys '(("P" . 72)))
+          (should (equal (piano--helper-keys-argument) "P"))
           ;; The map object must stay the one `define-minor-mode'
           ;; recorded in `minor-mode-map-alist'.
           (should (eq old-map piano-mode-map))
           (should (eq (cdr (assq 'piano-mode minor-mode-map-alist))
                       piano-mode-map))
+          (should (eq (lookup-key piano-mode-map "p") #'ignore))
           (should restarted))
       (customize-set-variable 'piano-keys old-keys))))
 

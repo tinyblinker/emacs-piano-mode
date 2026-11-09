@@ -83,13 +83,7 @@ note number, with middle C as 60.  Changing this rebuilds the keymap
 and restarts a running key reader."
   :group 'piano
   :type '(alist :key-type string :value-type integer)
-  :set (lambda (symbol value)
-         (set-default symbol value)
-         ;; piano-mode-map is unbound while the file is still loading,
-         ;; so everything after the guard only runs on real changes.
-         (when (boundp 'piano-mode-map)
-           (piano--rebuild-map)
-           (piano--restart-helper))))
+  :set #'piano--set-helper-option)
 
 (defcustom piano-keys-program "piano-keys"
   "Name (or path) of the native key reader program."
@@ -232,41 +226,17 @@ no SoundFont can be found."
            piano--active)
   (clrhash piano--active))
 
-(defun piano-play-key ()
-  "Shadow a mapped key so it does not self-insert in piano buffers.
-The key reader reports the real key-down and key-up events."
-  (interactive))
-
-(defvar piano-mode-map nil
-  "Keymap for `piano-mode'.
-
-The bindings shadow the keys read by the native helper so they do not
-self-insert while the helper listens globally.")
-
-(defun piano--rebuild-map ()
-  "Rebuild the active `piano-mode-map' in place.
-Printable keys are ignored so the piano buffer runs no editing or
-navigation commands; the native reader still receives every key."
-  (let ((map (if (keymapp piano-mode-map)
-                 piano-mode-map
-               (make-sparse-keymap))))
-    (setq piano-mode-map map)
-    ;; `define-minor-mode' keeps a reference to this keymap object in
-    ;; `minor-mode-map-alist'.  Mutate it instead of replacing it so
-    ;; that customization takes effect immediately.
-    (setcdr map nil)
-    ;; Ignore printable ASCII (letters, digits, punctuation) in the
-    ;; piano buffer.  Control/meta keys such as C-g and M-x remain
-    ;; usable to leave or configure the mode.
+(defvar piano-mode-map
+  (let ((map (make-sparse-keymap)))
+    ;; The reader watches keys globally; swallow printable input and
+    ;; the common editing keys so they cannot change the piano buffer.
     (dotimes (offset 95)
       (define-key map (char-to-string (+ 32 offset)) #'ignore))
-    ;; Also swallow the common navigation/editing keys that would
-    ;; otherwise scroll or indent the piano buffer.
     (dolist (key '("\t" "\r" "\d"))
       (define-key map key #'ignore))
-    (define-key map [remap self-insert-command] #'ignore)))
-
-(piano--rebuild-map)
+    (define-key map [remap self-insert-command] #'ignore)
+    map)
+  "Keymap for `piano-mode'.")
 
 (defun piano--helper-keys-argument ()
   "Return the --keys argument derived from `piano-keys'."
