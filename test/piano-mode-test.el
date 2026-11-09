@@ -486,6 +486,8 @@ Return PREDICATE's final value."
                            (pop answers)))
                         ((symbol-function 'piano--stable-device-path)
                          (lambda (path) path))
+                        ((symbol-function 'file-equal-p)
+                         (lambda (_first _second) t))
                         ((symbol-function 'customize-save-variable)
                          (lambda (symbol value)
                            (customize-set-variable symbol value))))
