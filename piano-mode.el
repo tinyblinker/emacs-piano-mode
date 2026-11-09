@@ -2,7 +2,7 @@
 
 ;; Author: shyweeds
 ;; Maintainer: shyweeds
-;; Version: 0.3.4
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: games, multimedia
 ;; URL: https://github.com/tinyblinker/emacs-piano-mode

@@ -55,7 +55,8 @@ With Emacs 30 or newer, install the package and start it with:
 (use-package piano-mode
   :vc (:url "https://github.com/tinyblinker/emacs-piano-mode")
   :custom
-  ;; (KEY . MIDI) pairs; add as many as you like.  Middle C is 60.
+  ;; (KEY . MIDI) pairs; add as many as you like.  Key names are
+  ;; case-insensitive, so "a" and "A" are the same key.  Middle C is 60.
   (piano-keys '(("a" . 60) ("w" . 61) ("s" . 62)))
   ;; Reader executable: a name on PATH or an absolute path.
   (piano-keys-program "piano-keys")
@@ -86,11 +87,13 @@ With Emacs 30 or newer, install the package and start it with:
 
 Then run =M-x piano-play=; =M-x piano-mode= (or killing the
 =*piano*= buffer) stops it.  Changing =piano-keys= takes effect
-immediately, as do =piano-transpose= and =piano-velocity=.  Reader
-options restart =piano-keys=; synthesizer options restart
-FluidSynth when it is running.  =piano-device= set to a non-nil path
-restarts the reader; set it to nil only if you want to clear the
-saved choice, and use =M-x piano-select-device= to choose a device.
+immediately, as do =piano-transpose= and =piano-velocity=.  Key
+names are case-insensitive, so an uppercase layout works without
+changes.  Reader options restart =piano-keys=; synthesizer options
+restart FluidSynth when it is running.  =piano-device= set to a
+non-nil path restarts a running reader; set it to nil only if you
+want to clear the saved choice, and use =M-x piano-select-device=
+to choose a device.
 If an older checkout is already installed, remove
 =~/.config/emacs/elpa/piano-mode= (or run =M-x package-vc-upgrade=)
 and evaluate the form again.
@@ -117,9 +120,9 @@ If startup fails, check =*Messages*=: the error names the missing
 SoundFont, FluidSynth, Cargo, piano-keys, or permission problem.
 
 * Troubleshooting
-- *No sound*: make sure the key is in =piano-keys=, the =*piano*=
-  buffer is selected, and the saved =piano-device= is the keyboard
-  you are using.  =M-x piano-select-device= picks and saves a stable
+- *No sound*: make sure the key is in =piano-keys= (case does not
+  matter), the =*piano*= buffer is selected, and the saved
+  =piano-device= is the keyboard you are using.  =M-x piano-select-device= picks and saves a stable
   device path.  =M-x piano-test-note= tests the synthesizer alone.
 - *Missing dependency*: startup errors name the missing FluidSynth,
   SoundFont, Cargo, or =piano-keys= binary.  See the Dependencies
