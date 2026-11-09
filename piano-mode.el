@@ -25,13 +25,17 @@
 (require 'seq)
 (require 'subr-x)
 
+(defgroup piano nil
+  "Play a piano from your computer keyboard."
+  :group 'games
+  :prefix "piano-")
+
 (defun piano--guess-load-dir ()
   "Return the directory piano-mode was loaded from, or nil.
 When `load-file-name' names a native-compiled .eln inside the eln
 cache, ask `locate-library' for the installed source directory
 instead."
-  (let ((file (or (and (boundp 'load-file-name) load-file-name)
-                  (buffer-file-name))))
+  (let ((file (or load-file-name (buffer-file-name))))
     (cond
      ((and file (not (string-suffix-p ".eln" file)))
       (file-name-directory file))
@@ -45,30 +49,43 @@ instead."
 Used to find the SoundFont and the native key reader bundled next
 to the loaded file.")
 
-(defun piano--set-helper-option (symbol value)
-  "Set SYMBOL to VALUE and restart a running key reader."
-  (set-default symbol value)
-  (when (fboundp 'piano--restart-helper)
-    (piano--restart-helper)))
+;; Note state and both processes are global: sound comes from a single
+;; instrument, no matter which buffer started it.
+(defvar piano--notes (make-hash-table :test #'eql)
+  "MIDI notes currently sounding.")
 
-(defun piano--set-device-option (symbol value)
-  "Set SYMBOL to VALUE and restart the reader for a non-empty device."
-  (set-default symbol value)
-  (when (and (stringp value)
-             (not (string-empty-p value))
-             (fboundp 'piano--restart-helper))
-    (piano--restart-helper)))
+(defvar piano--keys-process nil
+  "The native key reader process.")
+
+(defvar piano--synth-process nil
+  "The FluidSynth process.")
+
+(defvar piano--buffer nil
+  "The dedicated buffer created by `piano-play'.")
+
+(defconst piano--keys-stderr " *piano-keys-errors*"
+  "Buffer receiving the key reader's standard error.")
+
+(defconst piano--synth-stderr " *piano-fluidsynth-errors*"
+  "Buffer receiving FluidSynth's standard error.")
+
+;;; Options
+
+(defun piano--set-helper-option (symbol value)
+  "Set SYMBOL to VALUE and restart a live key reader."
+  (unless (and (default-boundp symbol)
+               (equal value (default-value symbol)))
+    (set-default symbol value)
+    (when (process-live-p piano--keys-process)
+      (piano--restart-helper))))
 
 (defun piano--set-synth-option (symbol value)
-  "Set SYMBOL to VALUE and restart a running synthesizer."
-  (set-default symbol value)
-  (when (fboundp 'piano--restart-synth)
-    (piano--restart-synth)))
-
-(defgroup piano nil
-  "Play a piano from your computer keyboard."
-  :group 'games
-  :prefix "piano-")
+  "Set SYMBOL to VALUE and restart a live synthesizer."
+  (unless (and (default-boundp symbol)
+               (equal value (default-value symbol)))
+    (set-default symbol value)
+    (when (process-live-p piano--synth-process)
+      (piano--restart-synth))))
 
 (defcustom piano-keys
   '(("a" . 60) ("w" . 61) ("s" . 62) ("e" . 63) ("d" . 64)
@@ -78,9 +95,9 @@ to the loaded file.")
   "Alist mapping key names to MIDI note numbers.
 
 Each element is (KEY . MIDI).  KEY is a single letter, digit or
-punctuation character accepted by `piano-keys-program'; MIDI is a
-note number, with middle C as 60.  Changing this rebuilds the keymap
-and restarts a running key reader."
+punctuation character accepted by `piano-keys-program'; letters are
+matched case-insensitively.  MIDI is a note number, with middle C as
+60.  Changing this restarts a running key reader."
   :group 'piano
   :type '(alist :key-type string :value-type integer)
   :set #'piano--set-helper-option)
@@ -119,7 +136,7 @@ device, e.g. \"/dev/input/by-id/usb-Keychron_K8_Pro-event-kbd\".
 `piano-select-device' re-runs the interactive choice and saves it."
   :group 'piano
   :type '(choice (const :tag "Ask when needed" nil) string)
-  :set #'piano--set-device-option)
+  :set #'piano--set-helper-option)
 
 (defcustom piano-poll-ms 4
   "Keyboard polling interval in milliseconds."
@@ -164,22 +181,7 @@ Nil lets FluidSynth pick its default."
   :type 'number
   :set #'piano--set-synth-option)
 
-;; Note state is a global resource (sound comes from one global
-;; process), so these variables are not buffer-local.
-(defvar piano--active (make-hash-table :test #'eql)
-  "MIDI notes currently sounding.")
-(defvar piano--keys-process nil
-  "The native key reader process.")
-(defvar piano--synth-process nil
-  "The FluidSynth process.")
-(defvar piano--stopping nil
-  "Non-nil while `piano--stop' is running.")
-(defvar piano--synth-starting nil
-  "Non-nil while `piano--start-synth' waits for FluidSynth to start.")
-(defvar piano--piano-buffer nil
-  "The dedicated piano buffer created by `piano-play'.")
-(defvar piano--focused-p nil
-  "Whether the piano buffer currently has focus.")
+;;; Synthesizer
 
 (defun piano--soundfont ()
   "Return a readable SoundFont file name.
@@ -209,22 +211,24 @@ no SoundFont can be found."
 
 (defun piano--note-on (midi)
   "Start MIDI note MIDI unless it is already sounding."
-  (unless (gethash midi piano--active)
-    (puthash midi t piano--active)
+  (unless (gethash midi piano--notes)
+    (puthash midi t piano--notes)
     (piano--synth-send "noteon 0 %d %d\n" midi piano-velocity)))
 
 (defun piano--note-off (midi)
   "Stop MIDI note MIDI."
-  (when (gethash midi piano--active)
-    (remhash midi piano--active)
+  (when (gethash midi piano--notes)
+    (remhash midi piano--notes)
     (piano--synth-send "noteoff 0 %d\n" midi)))
 
 (defun piano--all-notes-off ()
   "Release every sounding note."
   (maphash (lambda (midi _active)
              (piano--synth-send "noteoff 0 %d\n" midi))
-           piano--active)
-  (clrhash piano--active))
+           piano--notes)
+  (clrhash piano--notes))
+
+;;; Keymap
 
 (defvar piano-mode-map
   (let ((map (make-sparse-keymap)))
@@ -237,6 +241,8 @@ no SoundFont can be found."
     (define-key map [remap self-insert-command] #'ignore)
     map)
   "Keymap for `piano-mode'.")
+
+;;; Key reader
 
 (defun piano--helper-keys-argument ()
   "Return the --keys argument derived from `piano-keys'."
@@ -340,94 +346,95 @@ run \"cargo build --release\" in %s, or set `piano-keys-program'"
           (directory-files "/dev/input/by-path" t "event-kbd\\'"))))
       path))
 
-(defun piano--device-listed-p (program device)
-  "Return non-nil when DEVICE is a keyboard reported by PROGRAM."
-  (seq-some (lambda (candidate)
-              (ignore-errors
-                (file-equal-p (cdr candidate) device)))
-            (piano--list-devices program)))
-
-(defun piano--prompt-device (program)
-  "Return a keyboard path reported by PROGRAM, asking when needed."
-  (let ((devices (piano--list-devices program)))
-    (cond ((null devices)
-           (user-error
-            "No readable keyboard found under /dev/input; add yourself \
-to the input group (or grant udev uaccess access) and try again"))
-          ((null (cdr devices))
-           ;; Only one keyboard: use it without asking.
-           (piano--stable-device-path (cdar devices)))
-          (t
-           (let* ((choices (cons "Auto-detect (first match)"
-                                 (mapcar #'car devices)))
-                  (choice (completing-read "Keyboard device: " choices nil t)))
-             (unless (string-prefix-p "Auto-detect" choice)
-               (let ((path (piano--stable-device-path
-                            (cdr (assoc choice devices)))))
-                 (customize-save-variable 'piano-device path)
-                 (message "Piano keyboard device saved: %s" path)
-                 path)))))))
-
 (defun piano--select-device (program)
   "Return the evdev device path to use, or nil for auto-detection.
-
-Uses `piano-device' when it still names a keyboard PROGRAM can see.
-Otherwise asks for a keyboard and saves a stable path, so event
-numbers changing across reboots do not break the saved choice."
-  (let ((saved (and (stringp piano-device)
+Reuse `piano-device' when PROGRAM still lists it; otherwise let the
+user choose a keyboard and save a stable path.  A single keyboard is
+used without asking."
+  (let ((devices (piano--list-devices program))
+        (saved (and (stringp piano-device)
                     (not (string-empty-p piano-device))
                     piano-device)))
     (cond
-     ((and saved (piano--device-listed-p program saved))
+     ((null devices)
+      (user-error
+       "No readable keyboard found under /dev/input; add yourself \
+to the input group (or grant udev uaccess access) and try again"))
+     ((and saved
+           (seq-some (lambda (candidate)
+                       (ignore-errors
+                         (file-equal-p (cdr candidate) saved)))
+                     devices))
       (piano--stable-device-path saved))
-     (saved
-      (message "Saved piano keyboard %s is no longer available; choose another"
-               saved)
-      (setq piano-device nil)
-      (piano--prompt-device program))
      (t
-      (piano--prompt-device program)))))
+      (when saved
+        (message "Saved piano keyboard %s is no longer available; choose another"
+                 saved)
+        (setq piano-device nil))
+      (if (null (cdr devices))
+          (piano--stable-device-path (cdar devices))
+        (let* ((choices (cons "Auto-detect (first match)"
+                              (mapcar #'car devices)))
+               (choice (completing-read "Keyboard device: " choices nil t)))
+          (unless (string-prefix-p "Auto-detect" choice)
+            (let ((path (piano--stable-device-path
+                         (cdr (assoc choice devices)))))
+              (customize-save-variable 'piano-device path)
+              path))))))))
+
+(defun piano--device-label ()
+  "Return the configured device path, or \"auto-detect\"."
+  (if (and (stringp piano-device)
+           (not (string-empty-p piano-device)))
+      piano-device
+    "auto-detect"))
 
 ;;;###autoload
 (defun piano-select-device ()
   "Choose the keyboard device for `piano-mode' and save the choice."
   (interactive)
-  (let* ((piano-device nil)              ; force a fresh prompt
+  (let* ((piano-device nil)              ; force a fresh choice
          (program (piano--ensure-keys-program))
          (device (piano--select-device program)))
     (customize-save-variable 'piano-device device)
-    ;; A non-nil choice restarts the reader through its :set handler;
-    ;; auto-detect needs an explicit restart.
-    (unless (stringp device)
+    ;; A live reader was restarted by the option setter.  If it had
+    ;; died, start it again now that the mode is still active.
+    (when (and (piano--mode-running-p)
+               (not (process-live-p piano--keys-process)))
       (piano--restart-helper))
     (message "Piano keyboard device: %s" (or device "auto-detect"))))
 
-(defun piano--helper-active-p ()
-  "Return non-nil when the piano buffer exists and has focus.
+;;; Key events
 
-Events are only processed while the dedicated piano buffer is shown
-in the selected window, so other buffers keep normal typing."
-  (and piano--piano-buffer
-       (eq (window-buffer (selected-window)) piano--piano-buffer)))
+(defun piano--buffer-selected-p ()
+  "Return non-nil when the dedicated piano buffer is selected."
+  (and (buffer-live-p piano--buffer)
+       (eq (window-buffer (selected-window)) piano--buffer)))
+
+(defun piano--selection-changed (_window)
+  "Release all notes when the piano buffer stops being selected."
+  (unless (eq (window-buffer (selected-window)) piano--buffer)
+    (piano--all-notes-off)))
 
 (defun piano--apply-key-event (action key)
   "Turn an ACTION (\"down\"/\"up\") event for KEY into note-on/note-off.
 KEY names are matched case-insensitively, because the native reader
-always reports letters in upper case."
+always reports letters in upper case.  Key-up events are always
+processed so a note cannot stick when the buffer loses focus."
   (let ((midi (cdr (assoc-string key piano-keys t))))
     (when midi
-      (pcase action
-        ("down" (piano--note-on (+ midi piano-transpose)))
-        ("up" (piano--note-off (+ midi piano-transpose)))))))
+      (let ((note (+ midi piano-transpose)))
+        (pcase action
+          ("down" (when (piano--buffer-selected-p)
+                    (piano--note-on note)))
+          ("up" (piano--note-off note)))))))
 
 (defun piano--handle-keys-line (line)
   "Dispatch one LINE of key-reader output."
   (pcase (split-string line " " t)
-    (`(,action ,key)
-     (when (piano--helper-active-p)
-       (piano--apply-key-event action key)))
+    (`(,action ,key) (piano--apply-key-event action key))
     (_ (unless (string-empty-p line)
-         (message "piano-keys: unrecognized line %S" line)))))
+         (message "Piano-keys: unrecognized line %S" line)))))
 
 (defun piano--keys-filter (process string)
   "Parse \"down KEY\" / \"up KEY\" lines from the key reader PROCESS.
@@ -442,108 +449,102 @@ kept in a process property until they are finished."
         (piano--handle-keys-line line)))
     (process-put process 'piano-pending pending)))
 
-(defun piano--keys-error-tail ()
-  "Return the tail of the piano-keys stderr, or an empty string."
-  (with-current-buffer (get-buffer-create " *piano-keys-errors*")
-    (string-trim (buffer-string))))
+;;; Processes
+
+(defun piano--stderr (name)
+  "Return non-empty trimmed standard error from buffer NAME, or nil."
+  (when-let* ((buffer (get-buffer name)))
+    (let ((text (with-current-buffer buffer
+                  (string-trim (buffer-string)))))
+      (unless (string-empty-p text) text))))
+
+(defun piano--reset-stderr (name)
+  "Clear the standard error buffer NAME."
+  (with-current-buffer (get-buffer-create name)
+    (erase-buffer)))
 
 (defun piano--keys-sentinel (process event)
   "Handle the key reader PROCESS exiting with EVENT."
   (when (memq (process-status process) '(exit signal))
     (when (eq process piano--keys-process)
       (setq piano--keys-process nil))
-    (unless piano--stopping
-      (piano--all-notes-off)
-      (let ((tail (piano--keys-error-tail)))
-        (message "The piano-keys reader exited: %s; check the device and run M-x piano-select-device"
-                 (if (string-empty-p tail) (string-trim event) tail))))))
+    (piano--all-notes-off)
+    (message "The piano-keys reader exited: %s; run M-x piano-select-device"
+             (or (piano--stderr piano--keys-stderr)
+                 (string-trim event)))))
 
 (defun piano--start-helper ()
   "Start the native key reader."
   (unless (process-live-p piano--keys-process)
     (let* ((program (piano--ensure-keys-program))
            (device (piano--select-device program)))
-      (with-current-buffer (get-buffer-create " *piano-keys-errors*")
-        (erase-buffer))
-      (setq piano--keys-process
-            (make-process
-             :name "piano-keys"
-             :command (append (list program
-                                    "--keys" (piano--helper-keys-argument)
-                                    "--poll-ms" (number-to-string piano-poll-ms))
-                              (when device (list "--device" device))
-                              piano-keys-extra-args)
-             :connection-type 'pipe
-             :coding 'utf-8-unix
-             :noquery t
-             :buffer (generate-new-buffer " *piano-keys*")
-             :stderr (get-buffer-create " *piano-keys-errors*")
-             :filter #'piano--keys-filter
-             :sentinel #'piano--keys-sentinel))
-      ;; Catch a reader that exits immediately: bad device, permission
-      ;; problem, or an unsupported key name.
-      (accept-process-output piano--keys-process 0.1)
-      (unless (process-live-p piano--keys-process)
-        (let ((tail (piano--keys-error-tail)))
+      (piano--reset-stderr piano--keys-stderr)
+      (let ((process
+             (make-process
+              :name "piano-keys"
+              :command (append (list program
+                                     "--keys" (piano--helper-keys-argument)
+                                     "--poll-ms" (number-to-string piano-poll-ms))
+                               (when device (list "--device" device))
+                               piano-keys-extra-args)
+              :connection-type 'pipe
+              :coding 'utf-8-unix
+              :noquery t
+              :buffer (get-buffer-create " *piano-keys*")
+              :stderr (get-buffer-create piano--keys-stderr)
+              :filter #'piano--keys-filter
+              :sentinel #'ignore)))
+        (setq piano--keys-process process)
+        ;; Catch a reader that exits immediately: bad device, permission
+        ;; problem, or an unsupported key name.
+        (accept-process-output process 0.1)
+        (if (process-live-p process)
+            (set-process-sentinel process #'piano--keys-sentinel)
           (setq piano--keys-process nil)
-          (user-error "Piano-keys exited at startup: %s"
-                      (if (string-empty-p tail) "unknown error" tail)))))))
+          (user-error "Piano-keys exited during startup: %s"
+                      (or (piano--stderr piano--keys-stderr)
+                          "unknown error")))))))
 
-(defun piano--mode-active-p ()
+(defun piano--mode-running-p ()
   "Return non-nil when the piano buffer is still in `piano-mode'."
-  (and piano--piano-buffer
-       (buffer-live-p piano--piano-buffer)
-       (buffer-local-value 'piano-mode piano--piano-buffer)))
+  (and piano--buffer
+       (buffer-live-p piano--buffer)
+       (buffer-local-value 'piano-mode piano--buffer)))
 
 (defun piano--restart-helper ()
-  "Restart the key reader, starting it when the mode is active."
+  "Restart the key reader when the mode is active."
   (when (or (process-live-p piano--keys-process)
-            (piano--mode-active-p))
+            (piano--mode-running-p))
     (piano--all-notes-off)              ; keys held on the old device
     (when (process-live-p piano--keys-process)
-      (let ((piano--stopping t))        ; keep the sentinel quiet
-        (delete-process piano--keys-process)))
+      (set-process-sentinel piano--keys-process #'ignore)
+      (delete-process piano--keys-process))
     (setq piano--keys-process nil)
     (piano--start-helper)))
 
-(defun piano--window-changed (window)
-  "Release all notes when WINDOW stops showing the piano buffer."
-  (let ((focused (and piano--piano-buffer
-                      (eq (window-buffer window) piano--piano-buffer))))
-    (when (and piano--focused-p (not focused))
-      (piano--all-notes-off))
-    (setq piano--focused-p focused)))
-
-(defun piano--synth-error-tail ()
-  "Return the tail of FluidSynth's stderr, or an empty string."
-  (with-current-buffer (get-buffer-create " *piano-fluidsynth-errors*")
-    (string-trim (buffer-string))))
-
 (defun piano--synth-sentinel (process event)
-  "Handle the FluidSynth PROCESS exiting with EVENT."
+  "Handle FluidSynth PROCESS exiting with EVENT."
   (when (memq (process-status process) '(exit signal))
     (when (eq process piano--synth-process)
       (setq piano--synth-process nil))
-    (unless (or piano--stopping piano--synth-starting)
-      (message "FluidSynth exited: %s"
-               (let ((tail (piano--synth-error-tail)))
-                 (if (string-empty-p tail) (string-trim event) tail))))))
+    ;; The notes died with the synthesizer.
+    (clrhash piano--notes)
+    (message "FluidSynth exited: %s"
+             (or (piano--stderr piano--synth-stderr)
+                 (string-trim event)))))
 
 (defun piano--start-synth ()
   "Start FluidSynth unless it is already running.
 
 Signal a `user-error' when FluidSynth exits during startup, e.g. on
 a bad SoundFont or an unusable audio driver."
-  (unless (and piano--synth-process
-               (process-live-p piano--synth-process))
+  (unless (process-live-p piano--synth-process)
     (let ((program (or (executable-find piano-synth-program)
                        (user-error "FluidSynth not found (%S); install it first"
                                    piano-synth-program)))
           (soundfont (piano--soundfont)))
-      (with-current-buffer (get-buffer-create " *piano-fluidsynth-errors*")
-        (erase-buffer))
-      (let ((piano--synth-starting t)
-            (process
+      (piano--reset-stderr piano--synth-stderr)
+      (let ((process
              (make-process
               :name "piano-fluidsynth"
               :command (append (list program
@@ -554,58 +555,53 @@ a bad SoundFont or an unusable audio driver."
               :connection-type 'pipe
               :coding 'utf-8-unix
               :noquery t
-              :buffer (generate-new-buffer " *piano-fluidsynth*")
-              :stderr (get-buffer-create " *piano-fluidsynth-errors*")
-              :sentinel #'piano--synth-sentinel)))
+              :buffer (get-buffer-create " *piano-fluidsynth*")
+              :stderr (get-buffer-create piano--synth-stderr)
+              :sentinel #'ignore)))
         (setq piano--synth-process process)
         ;; Give it a moment to start: FluidSynth exits immediately on
         ;; a bad SoundFont or unusable audio driver.
         (accept-process-output process 0.3)
-        (unless (process-live-p process)
+        (if (process-live-p process)
+            (set-process-sentinel process #'piano--synth-sentinel)
           (setq piano--synth-process nil)
-          (user-error "FluidSynth exited at startup: %s"
-                      (or (piano--synth-error-tail) "unknown error")))))))
+          (user-error "FluidSynth exited during startup: %s"
+                      (or (piano--stderr piano--synth-stderr)
+                          "unknown error")))))))
+
+(defun piano--stop-synth ()
+  "Stop FluidSynth, releasing all notes first."
+  (when (process-live-p piano--synth-process)
+    (let ((process piano--synth-process))
+      (set-process-sentinel process #'ignore)
+      (ignore-errors
+        (piano--synth-send "cc 0 123 0\nquit\n"))
+      (accept-process-output process 0.2)
+      (when (process-live-p process)
+        (delete-process process))))
+  (setq piano--synth-process nil))
 
 (defun piano--restart-synth ()
-  "Restart a live FluidSynth process with the current settings."
+  "Restart FluidSynth when the mode is active."
   (when (or (process-live-p piano--synth-process)
-            (piano--mode-active-p))
-    (when (process-live-p piano--synth-process)
-      (let ((piano--synth-starting t)
-            (process piano--synth-process))
-        (ignore-errors (piano--synth-send "quit\n"))
-        (accept-process-output process 0.2)
-        (when (process-live-p process)
-          (delete-process process))))
-    (setq piano--synth-process nil)
+            (piano--mode-running-p))
+    (piano--stop-synth)
     (piano--start-synth)))
 
 (defun piano--start ()
   "Start the synthesizer and the key reader."
   (piano--start-synth)
-  (piano--start-helper)
-  (add-hook 'window-buffer-change-functions #'piano--window-changed)
-  ;; Record the focus state now: the hook above only fires on changes.
-  (setq piano--focused-p (piano--helper-active-p)))
+  (piano--start-helper))
 
 (defun piano--stop ()
-  "Stop the key reader, release all notes, stop the synthesizer."
-  (let ((piano--stopping t))
-    (remove-hook 'window-buffer-change-functions #'piano--window-changed)
-    (when (process-live-p piano--keys-process)
-      (delete-process piano--keys-process))
-    (setq piano--keys-process nil
-          piano--focused-p nil
-          piano--piano-buffer nil)
-    (piano--all-notes-off)
-    (when (process-live-p piano--synth-process)
-      (ignore-errors
-        (piano--synth-send "cc 0 123 0\nquit\n"))
-      (let ((process piano--synth-process))
-        (accept-process-output process 0.2)
-        (when (process-live-p process)
-          (delete-process process))))
-    (setq piano--synth-process nil)))
+  "Stop the key reader, release all notes, and stop the synthesizer."
+  (when (process-live-p piano--keys-process)
+    (set-process-sentinel piano--keys-process #'ignore)
+    (delete-process piano--keys-process))
+  (setq piano--keys-process nil
+        piano--buffer nil)
+  (piano--all-notes-off)
+  (piano--stop-synth))
 
 (defun piano--kill-buffer ()
   "Stop piano mode when its buffer is killed."
@@ -634,15 +630,14 @@ a bad SoundFont or an unusable audio driver."
   (interactive)
   (let ((buffer (get-buffer-create "*piano*")))
     (pop-to-buffer buffer)
-    (setq piano--piano-buffer buffer)
-    (add-hook 'kill-buffer-hook #'piano--kill-buffer nil t)
+    (setq piano--buffer buffer)
     (with-current-buffer buffer
       (unless (derived-mode-p 'special-mode)
-        (special-mode)))
-    ;; Enable the mode first: the device prompt (if any) must finish
-    ;; before the header below shows which device is active.
-    (piano-mode 1)
-    (with-current-buffer buffer
+        (special-mode))
+      (add-hook 'kill-buffer-hook #'piano--kill-buffer nil t)
+      (add-hook 'window-selection-change-functions
+                #'piano--selection-changed nil t)
+      (piano-mode 1)
       (piano--show-keys))))
 
 (defun piano--show-keys ()
@@ -650,25 +645,18 @@ a bad SoundFont or an unusable audio driver."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "piano-mode — the keys below are read globally by piano-keys\n"
-            (format "device: %s\n"
-                    (if (and (stringp piano-device)
-                             (not (string-empty-p piano-device)))
-                        piano-device
-                      "auto-detect"))
-            "white keys: "
-            (mapconcat (lambda (binding) (upcase (car binding)))
-                       piano-keys " ")
-            "\n"
-            "M-x piano-mode stops the instrument; kill this buffer to quit\n")
-    (add-text-properties (point-min) (point-max)
-                         '(piano-layout t))))
+            (format "keys: %s\n"
+                    (mapconcat (lambda (binding) (upcase (car binding)))
+                               piano-keys " "))
+            (format "device: %s\n" (piano--device-label))
+            "M-x piano-mode stops the instrument; kill this buffer to quit\n")))
 
+;;;###autoload
 (defun piano-test-note (&optional midi)
   "Play MIDI note MIDI (default 60) briefly, to test the sound path."
   (interactive)
   (let ((note (or midi 60)))
-    (unless (and piano--synth-process
-                 (process-live-p piano--synth-process))
+    (unless (process-live-p piano--synth-process)
       (piano--start-synth))
     (piano--note-on note)
     (run-at-time 0.8 nil #'piano--note-off note)))
