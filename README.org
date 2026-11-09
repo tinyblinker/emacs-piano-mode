@@ -1,9 +1,10 @@
 #+title: piano-mode
 #+options: toc:nil
 
-Turn your computer keyboard into a piano inside Emacs, with real
-key-down / key-up tracking: notes keep sounding exactly as long as
-you hold a key.
+Inspired by "https://github.com/defaultxr/piano-mode", turn
+your computer keyboard into a piano inside Emacs, with real
+key-down / key-up tracking: notes keep sounding exactly as
+long as you hold a key.
 
 * Dependencies
 =piano-mode= currently supports Linux only.  The installation
