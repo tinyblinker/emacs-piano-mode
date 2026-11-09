@@ -441,8 +441,10 @@ in the selected window, so other buffers keep normal typing."
        (eq (window-buffer (selected-window)) piano--piano-buffer)))
 
 (defun piano--apply-key-event (action key)
-  "Turn an ACTION (\"down\"/\"up\") event for KEY into note-on/note-off."
-  (let ((midi (cdr (assoc (downcase key) piano-keys))))
+  "Turn an ACTION (\"down\"/\"up\") event for KEY into note-on/note-off.
+KEY names are matched case-insensitively, because the native reader
+always reports letters in upper case."
+  (let ((midi (cdr (assoc-string key piano-keys t))))
     (when midi
       (pcase action
         ("down" (piano--note-on (+ midi piano-transpose)))

@@ -96,6 +96,25 @@ Return PREDICATE's final value."
     (should (member "noteoff 0 60\n" calls))
     (should (= 0 (hash-table-count piano--active)))))
 
+(ert-deftest piano-test-key-names-are-case-insensitive ()
+  "Uppercase `piano-keys' entries match the reader's uppercase names."
+  (let ((piano-keys '(("1" . 36) ("P" . 59) ("O" . 60) ("/" . 95)))
+        (calls '()))
+    (clrhash piano--active)
+    (cl-letf (((symbol-function 'piano--synth-send)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) calls)))
+              ((symbol-function 'piano--helper-active-p)
+               (lambda () t)))
+      (dolist (key '("1" "P" "O" "/"))
+        (piano--handle-keys-line (format "down %s" key))
+        (piano--handle-keys-line (format "up %s" key))))
+    (should (member "noteon 0 36 100\n" calls))
+    (should (member "noteon 0 59 100\n" calls))
+    (should (member "noteon 0 60 100\n" calls))
+    (should (member "noteon 0 95 100\n" calls))
+    (should (= 0 (hash-table-count piano--active)))))
+
 (ert-deftest piano-test-transpose ()
   "`piano-transpose' shifts the MIDI note."
   (let ((calls '())
