@@ -327,11 +327,12 @@ run \"cargo build --release\" in %s, or set `piano-keys-program'"
   (with-temp-buffer
     ;; stdout and stderr both land here, so a failure's stderr becomes
     ;; part of the error message below.
-    (unless (zerop (call-process program nil t nil "--list-devices"))
-      (user-error
-       "Listing keyboards failed (%s); check read access to /dev/input \
+    (let ((status (call-process program nil t nil "--list-devices")))
+      (unless (and (integerp status) (zerop status))
+        (user-error
+         "Listing keyboards failed (%s); check read access to /dev/input \
 (udev uaccess or the input group)"
-       (string-trim (buffer-string))))
+         (string-trim (buffer-string)))))
     (piano--parse-devices (buffer-string))))
 
 (defun piano--stable-device-path (path)
@@ -411,7 +412,7 @@ to the input group (or grant udev uaccess access) and try again"))
   (and (buffer-live-p piano--buffer)
        (eq (window-buffer (selected-window)) piano--buffer)))
 
-(defun piano--selection-changed (_window)
+(defun piano--window-state-changed (_window)
   "Release all notes when the piano buffer stops being selected."
   (unless (eq (window-buffer (selected-window)) piano--buffer)
     (piano--all-notes-off)))
@@ -635,8 +636,12 @@ a bad SoundFont or an unusable audio driver."
       (unless (derived-mode-p 'special-mode)
         (special-mode))
       (add-hook 'kill-buffer-hook #'piano--kill-buffer nil t)
+      ;; Release held notes when the buffer stops being displayed or
+      ;; selected; key-up events also release them on their own.
+      (add-hook 'window-buffer-change-functions
+                #'piano--window-state-changed nil t)
       (add-hook 'window-selection-change-functions
-                #'piano--selection-changed nil t)
+                #'piano--window-state-changed nil t)
       (piano-mode 1)
       (piano--show-keys))))
 

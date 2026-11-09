@@ -429,7 +429,7 @@ Return PREDICATE's final value."
       (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
       (should-not (piano--buffer-selected-p)))))    ; focus moved away
 
-(ert-deftest piano-test-selection-change-releases-notes ()
+(ert-deftest piano-test-window-change-releases-notes ()
   "Leaving the piano buffer releases notes that are still sounding."
   (let ((piano--buffer (current-buffer))
         (calls '()))
@@ -439,7 +439,7 @@ Return PREDICATE's final value."
                (lambda (format-string &rest args)
                  (push (apply #'format format-string args) calls))))
       (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
-      (piano--selection-changed (selected-window)))
+      (piano--window-state-changed (selected-window)))
     (should (member "noteoff 0 60\n" calls))
     (should (= 0 (hash-table-count piano--notes)))))
 
